@@ -56,6 +56,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap_ros/GetMap.h"
 #include "rtabmap_ros/ListLabels.h"
 #include "rtabmap_ros/PublishMap.h"
+#include "rtabmap_ros/RejectLoop.h"
 #include "rtabmap_ros/SetGoal.h"
 #include "rtabmap_ros/SetLabel.h"
 
@@ -196,6 +197,7 @@ private:
 	bool listLabelsCallback(rtabmap_ros::ListLabels::Request& req, rtabmap_ros::ListLabels::Response& res);
 	bool octomapBinaryCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
 	bool octomapFullCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
+	bool rejectLoopCallback(rtabmap_ros::RejectLoop::Request  &req, rtabmap_ros::RejectLoop::Response &res);
 
 	rtabmap::ParametersMap loadParameters(const std::string & configFile);
 	void saveParameters(const std::string & configFile);
@@ -387,6 +389,7 @@ private:
 	ros::ServiceServer listLabelsSrv_;
 	ros::ServiceServer octomapBinarySrv_;
 	ros::ServiceServer octomapFullSrv_;
+	ros::ServiceServer rejectLoopSrv_;
 
 	MoveBaseClient mbClient_;
 

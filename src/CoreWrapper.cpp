@@ -371,6 +371,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart) :
 	listLabelsSrv_ = nh.advertiseService("list_labels", &CoreWrapper::listLabelsCallback, this);
 	octomapBinarySrv_ = nh.advertiseService("octomap_binary", &CoreWrapper::octomapBinaryCallback, this);
 	octomapFullSrv_ = nh.advertiseService("octomap_full", &CoreWrapper::octomapFullCallback, this);
+	rejectLoopSrv_ = nh.advertiseService("reject_loop", &CoreWrapper::rejectLoopCallback, this);
 
 	setupCallbacks(subscribeDepth, subscribeLaserScan, subscribeStereo, queueSize, stereoApproxSync);
 
@@ -2582,6 +2583,24 @@ bool CoreWrapper::octomapFullCallback(
 		delete octree;
 	}
 	return success;
+}
+
+bool CoreWrapper::rejectLoopCallback(rtabmap_ros::RejectLoop::Request& req, rtabmap_ros::RejectLoop::Response& res)
+{
+	int old_id = req.oldId;
+	int new_id = req.newId;
+	if(old_id > 0 && new_id > 0)
+	{
+		ROS_INFO("Loop closure: Rejecting %d -> %d", old_id, new_id);
+		UTimer timer;
+		rtabmap_.rejectLoopClosure(old_id, new_id);
+		ROS_INFO("Loop closure: Time rejecting loop = %f s", timer.ticks());
+	}
+	else
+	{
+		ROS_ERROR("Loop closure: oldId and newId should be > 0 !");
+	}
+	return true;
 }
 
 /**

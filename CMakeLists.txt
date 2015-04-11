@@ -54,6 +54,7 @@ add_message_files(
    GetMap.srv
    ListLabels.srv
    PublishMap.srv
+   RejectLoop.srv
    ResetPose.srv
    SetGoal.srv
    SetLabel.srv
