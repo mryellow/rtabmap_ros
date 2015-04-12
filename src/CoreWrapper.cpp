@@ -2610,7 +2610,6 @@ bool CoreWrapper::rejectLoopCallback(rtabmap_ros::RejectLoop::Request& req, rtab
 bool CoreWrapper::allowLoopCallback(rtabmap_ros::AllowLoop::Request& req, rtabmap_ros::AllowLoop::Response& res)
 {
 	ROS_INFO("Allowing loop closures on service request");
-	// Add pairs that come in here, however only check for `whitelistClosures` bool when processing closures.
 	int old_id = req.oldId;
 	int new_id = req.newId;
 	if(old_id > 0 && new_id > 0)
@@ -2618,7 +2617,6 @@ bool CoreWrapper::allowLoopCallback(rtabmap_ros::AllowLoop::Request& req, rtabma
 		ROS_INFO("Allow closure: %d -> %d", old_id, new_id);
 		UTimer timer;
 		rtabmap_.allowLoopClosure(old_id, new_id);
-		//rtabmap_.rejectLoopClosure(old_id, new_id);
 		ROS_INFO("Allow closure: Time computing path = %f s", timer.ticks());
 	}
 	else
