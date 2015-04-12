@@ -130,7 +130,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart) :
 	bool publishTf = true;
 	double tfDelay = 0.05; // 20 Hz
 	bool stereoApproxSync = false;
-	bool gatekeepClosures = false;
+	bool whitelistClosures = false;
 
 	// ROS related parameters (private)
 	pnh.param("subscribe_depth", subscribeDepth, subscribeDepth);
@@ -158,7 +158,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart) :
 	pnh.param("odom_frame_id", odomFrameId_, odomFrameId_); // set to use odom from TF
 	pnh.param("queue_size", queueSize, queueSize);
 	pnh.param("stereo_approx_sync", stereoApproxSync, stereoApproxSync);
-	pnh.param("gatekeep_closures", gatekeepClosures, gatekeepClosures);
+	pnh.param("whitelist_closures", whitelistClosures, whitelistClosures);
 
 	pnh.param("publish_tf", publishTf, publishTf);
 	pnh.param("tf_delay", tfDelay, tfDelay);
@@ -2610,7 +2610,7 @@ bool CoreWrapper::rejectLoopCallback(rtabmap_ros::RejectLoop::Request& req, rtab
 bool CoreWrapper::allowLoopCallback(rtabmap_ros::AllowLoop::Request& req, rtabmap_ros::AllowLoop::Response& res)
 {
 	ROS_INFO("Allowing loop closures on service request");
-	// Add pairs that come in here, however only check for `gatekeepClosures` bool when processing closures.
+	// Add pairs that come in here, however only check for `whitelistClosures` bool when processing closures.
 	int old_id = req.oldId;
 	int new_id = req.newId;
 	if(old_id > 0 && new_id > 0)
