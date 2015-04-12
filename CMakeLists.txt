@@ -51,6 +51,7 @@ add_message_files(
 ## Generate services in the 'srv' folder
  add_service_files(
    FILES
+   AllowLoop.srv
    GetMap.srv
    ListLabels.srv
    PublishMap.srv

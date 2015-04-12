@@ -130,6 +130,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart) :
 	bool publishTf = true;
 	double tfDelay = 0.05; // 20 Hz
 	bool stereoApproxSync = false;
+	bool gatekeepClosures = false;
 
 	// ROS related parameters (private)
 	pnh.param("subscribe_depth", subscribeDepth, subscribeDepth);
@@ -157,6 +158,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart) :
 	pnh.param("odom_frame_id", odomFrameId_, odomFrameId_); // set to use odom from TF
 	pnh.param("queue_size", queueSize, queueSize);
 	pnh.param("stereo_approx_sync", stereoApproxSync, stereoApproxSync);
+	pnh.param("gatekeep_closures", gatekeepClosures, gatekeepClosures);
 
 	pnh.param("publish_tf", publishTf, publishTf);
 	pnh.param("tf_delay", tfDelay, tfDelay);
@@ -372,6 +374,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart) :
 	octomapBinarySrv_ = nh.advertiseService("octomap_binary", &CoreWrapper::octomapBinaryCallback, this);
 	octomapFullSrv_ = nh.advertiseService("octomap_full", &CoreWrapper::octomapFullCallback, this);
 	rejectLoopSrv_ = nh.advertiseService("reject_loop", &CoreWrapper::rejectLoopCallback, this);
+	allowLoopSrv_ = nh.advertiseService("allow_loop", &CoreWrapper::allowLoopCallback, this);
 
 	setupCallbacks(subscribeDepth, subscribeLaserScan, subscribeStereo, queueSize, stereoApproxSync);
 
@@ -2587,18 +2590,40 @@ bool CoreWrapper::octomapFullCallback(
 
 bool CoreWrapper::rejectLoopCallback(rtabmap_ros::RejectLoop::Request& req, rtabmap_ros::RejectLoop::Response& res)
 {
+	ROS_INFO("Rejecting loop closures on service request");
 	int old_id = req.oldId;
 	int new_id = req.newId;
 	if(old_id > 0 && new_id > 0)
 	{
-		ROS_INFO("Loop closure: Rejecting %d -> %d", old_id, new_id);
+		ROS_INFO("Reject closure: %d -> %d", old_id, new_id);
 		UTimer timer;
 		rtabmap_.rejectLoopClosure(old_id, new_id);
-		ROS_INFO("Loop closure: Time rejecting loop = %f s", timer.ticks());
+		ROS_INFO("Reject closure: Time rejecting loop = %f s", timer.ticks());
 	}
 	else
 	{
-		ROS_ERROR("Loop closure: oldId and newId should be > 0 !");
+		ROS_ERROR("Reject closure: oldId and newId should be > 0 !");
+	}
+	return true;
+}
+
+bool CoreWrapper::allowLoopCallback(rtabmap_ros::AllowLoop::Request& req, rtabmap_ros::AllowLoop::Response& res)
+{
+	ROS_INFO("Allowing loop closures on service request");
+	// Add pairs that come in here, however only check for `gatekeepClosures` bool when processing closures.
+	int old_id = req.oldId;
+	int new_id = req.newId;
+	if(old_id > 0 && new_id > 0)
+	{
+		ROS_INFO("Allow closure: %d -> %d", old_id, new_id);
+		UTimer timer;
+		rtabmap_.allowLoopClosure(old_id, new_id);
+		//rtabmap_.rejectLoopClosure(old_id, new_id);
+		ROS_INFO("Allow closure: Time computing path = %f s", timer.ticks());
+	}
+	else
+	{
+		ROS_ERROR("Allow closure: oldId and newId should be > 0 !");
 	}
 	return true;
 }
