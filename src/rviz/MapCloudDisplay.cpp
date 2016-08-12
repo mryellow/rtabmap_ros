@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -25,9 +25,9 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <QtGui/QApplication>
-#include <QtGui/QMessageBox>
-#include <QtCore/QTimer>
+#include <QApplication>
+#include <QMessageBox>
+#include <QTimer>
 
 #include <OgreSceneNode.h>
 #include <OgreSceneManager.h>
@@ -50,6 +50,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "MapCloudDisplay.h"
 #include <rtabmap/core/Transform.h>
+#include <rtabmap/core/util3d_transforms.h>
+#include <rtabmap/core/util3d_filtering.h>
 #include <rtabmap/core/util3d.h>
 #include <rtabmap/core/Compression.h>
 #include <rtabmap/core/Graph.h>
@@ -64,6 +66,7 @@ namespace rtabmap_ros
 MapCloudDisplay::CloudInfo::CloudInfo() :
 		manager_(0),
 		pose_(rtabmap::Transform::getIdentity()),
+		id_(0),
 		scene_node_(0)
 {}
 
@@ -83,6 +86,9 @@ void MapCloudDisplay::CloudInfo::clear()
 
 MapCloudDisplay::MapCloudDisplay()
   : spinner_(1, &cbqueue_),
+    new_xyz_transformer_(false),
+    new_color_transformer_(false),
+    needs_retransform_(false),
     transformer_class_loader_(NULL)
 {
 	//QIcon icon;
@@ -137,6 +143,12 @@ MapCloudDisplay::MapCloudDisplay()
 	cloud_max_depth_->setMin( 0.0f );
 	cloud_max_depth_->setMax( 999.0f );
 
+	cloud_min_depth_ = new rviz::FloatProperty( "Cloud min depth (m)", 0.0f,
+											 "Minimum depth of the generated clouds.",
+											 this, SLOT( updateCloudParameters() ), this );
+	cloud_min_depth_->setMin( 0.0f );
+	cloud_min_depth_->setMax( 999.0f );
+
 	cloud_voxel_size_ = new rviz::FloatProperty( "Cloud voxel size (m)", 0.01f,
 										 "Voxel size of the generated clouds.",
 										 this, SLOT( updateCloudParameters() ), this );
@@ -150,7 +162,14 @@ MapCloudDisplay::MapCloudDisplay()
 	cloud_filter_floor_height_->setMin( 0.0f );
 	cloud_filter_floor_height_->setMax( 999.0f );
 
-	node_filtering_radius_ = new rviz::FloatProperty( "Node filtering radius (m)", 0.2f,
+	cloud_filter_ceiling_height_ = new rviz::FloatProperty( "Filter ceiling (m)", 0.0f,
+										 "Filter the ceiling at the specified height set here "
+										 "(only appropriate for 2D mapping).",
+										 this, SLOT( updateCloudParameters() ), this );
+	cloud_filter_ceiling_height_->setMin( 0.0f );
+	cloud_filter_ceiling_height_->setMax( 999.0f );
+
+	node_filtering_radius_ = new rviz::FloatProperty( "Node filtering radius (m)", 0.0f,
 										 "(Disabled=0) Only keep one node in the specified radius.",
 										 this, SLOT( updateCloudParameters() ), this );
 	node_filtering_radius_->setMin( 0.0f );
@@ -243,73 +262,68 @@ void MapCloudDisplay::processMessage( const rtabmap_ros::MapDataConstPtr& msg )
 
 void MapCloudDisplay::processMapData(const rtabmap_ros::MapData& map)
 {
+	std::map<int, rtabmap::Transform> poses;
+	for(unsigned int i=0; i<map.graph.posesId.size() && i<map.graph.poses.size(); ++i)
+	{
+		poses.insert(std::make_pair(map.graph.posesId[i], rtabmap_ros::transformFromPoseMsg(map.graph.poses[i])));
+	}
+
 	// Add new clouds...
 	for(unsigned int i=0; i<map.nodes.size() && i<map.nodes.size(); ++i)
 	{
 		int id = map.nodes[i].id;
-		if(cloud_infos_.find(id) == cloud_infos_.end())
+		if(poses.find(id) != poses.end() &&
+		   cloud_infos_.find(id) == cloud_infos_.end())
 		{
 			// Cloud not added to RVIZ, add it!
-			rtabmap::Transform localTransform = transformFromGeometryMsg(map.nodes[i].localTransform);
-			if(!localTransform.isNull())
+			rtabmap::Signature s = rtabmap_ros::nodeDataFromROS(map.nodes[i]);
+			if(!s.sensorData().imageCompressed().empty() &&
+			   !s.sensorData().depthOrRightCompressed().empty() &&
+			   (s.sensorData().cameraModels().size() || s.sensorData().stereoCameraModel().isValidForProjection()))
 			{
 				cv::Mat image, depth;
-				float fx = map.nodes[i].fx;
-				float fy = map.nodes[i].fy;
-				float cx = map.nodes[i].cx;
-				float cy = map.nodes[i].cy;
+				s.sensorData().uncompressData(&image, &depth, 0);
 
-				//uncompress data
-				rtabmap::CompressionThread ctImage(compressedMatFromBytes(map.nodes[i].image, false), true);
-				rtabmap::CompressionThread ctDepth(compressedMatFromBytes(map.nodes[i].depth, false), true);
-				ctImage.start();
-				ctDepth.start();
-				ctImage.join();
-				ctDepth.join();
-				image = ctImage.getUncompressedData();
-				depth = ctDepth.getUncompressedData();
 
-				if(!image.empty() && !depth.empty() && fx > 0.0f && fy > 0.0f && cx >= 0.0f && cy >= 0.0f)
+				if(!s.sensorData().imageRaw().empty() && !s.sensorData().depthOrRightRaw().empty())
 				{
 					pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud;
-					if(depth.type() == CV_8UC1)
+					pcl::IndicesPtr validIndices(new std::vector<int>);
+					cloud = rtabmap::util3d::cloudRGBFromSensorData(
+							s.sensorData(),
+							cloud_decimation_->getInt(),
+							cloud_max_depth_->getFloat(),
+							cloud_min_depth_->getFloat(),
+							validIndices.get());
+
+					if(cloud_voxel_size_->getFloat())
 					{
-						cloud = rtabmap::util3d::cloudFromStereoImages(image, depth, cx, cy, fx, fy, cloud_decimation_->getInt());
-					}
-					else
-					{
-						cloud = rtabmap::util3d::cloudFromDepthRGB(image, depth, cx, cy, fx, fy, cloud_decimation_->getInt());
-					}
-					if(cloud_max_depth_->getFloat() > 0.0f)
-					{
-						cloud = rtabmap::util3d::passThrough<pcl::PointXYZRGB>(cloud, "z", 0, cloud_max_depth_->getFloat());
-					}
-					if(cloud_voxel_size_->getFloat() > 0.0f)
-					{
-						cloud = rtabmap::util3d::voxelize<pcl::PointXYZRGB>(cloud, cloud_voxel_size_->getFloat());
+						cloud = rtabmap::util3d::voxelize(cloud, validIndices, cloud_voxel_size_->getFloat());
 					}
 
-					cloud = rtabmap::util3d::transformPointCloud<pcl::PointXYZRGB>(cloud, localTransform);
-
-					// do it after local transform
-					if(cloud_filter_floor_height_->getFloat() > 0.0f)
+					if(cloud->size())
 					{
-						cloud = rtabmap::util3d::passThrough<pcl::PointXYZRGB>(cloud, "z", cloud_filter_floor_height_->getFloat(), 999.0f);
-					}
+						if(cloud_filter_floor_height_->getFloat() > 0.0f || cloud_filter_ceiling_height_->getFloat() > 0.0f)
+						{
+							cloud = rtabmap::util3d::passThrough(cloud, "z",
+									cloud_filter_floor_height_->getFloat()>0.0f?cloud_filter_floor_height_->getFloat():-999.0f,
+									cloud_filter_ceiling_height_->getFloat()>0.0f && (cloud_filter_floor_height_->getFloat()<=0.0f || cloud_filter_ceiling_height_->getFloat()>cloud_filter_floor_height_->getFloat())?cloud_filter_ceiling_height_->getFloat():999.0f);
+						}
 
-					sensor_msgs::PointCloud2::Ptr cloudMsg(new sensor_msgs::PointCloud2);
-					pcl::toROSMsg(*cloud, *cloudMsg);
-					cloudMsg->header = map.header;
+						sensor_msgs::PointCloud2::Ptr cloudMsg(new sensor_msgs::PointCloud2);
+						pcl::toROSMsg(*cloud, *cloudMsg);
+						cloudMsg->header = map.header;
 
-					CloudInfoPtr info(new CloudInfo);
-					info->message_ = cloudMsg;
-					info->pose_ = rtabmap::Transform::getIdentity();
-					info->id_ = id;
+						CloudInfoPtr info(new CloudInfo);
+						info->message_ = cloudMsg;
+						info->pose_ = rtabmap::Transform::getIdentity();
+						info->id_ = id;
 
-					if (transformCloud(info, true))
-					{
-						boost::mutex::scoped_lock lock(new_clouds_mutex_);
-						new_cloud_infos_.insert(std::make_pair(id, info));
+						if (transformCloud(info, true))
+						{
+							boost::mutex::scoped_lock lock(new_clouds_mutex_);
+							new_cloud_infos_.insert(std::make_pair(id, info));
+						}
 					}
 				}
 			}
@@ -317,12 +331,6 @@ void MapCloudDisplay::processMapData(const rtabmap_ros::MapData& map)
 	}
 
 	// Update graph
-	std::map<int, rtabmap::Transform> poses;
-	for(unsigned int i=0; i<map.graph.nodeIds.size() && i<map.graph.poses.size(); ++i)
-	{
-		poses.insert(std::make_pair(map.graph.nodeIds[i], rtabmap_ros::transformFromPoseMsg(map.graph.poses[i])));
-	}
-
 	if(node_filtering_angle_->getFloat() > 0.0f && node_filtering_radius_->getFloat() > 0.0f)
 	{
 		poses = rtabmap::graph::radiusPosesFiltering(poses,
@@ -716,7 +724,6 @@ void MapCloudDisplay::update( float wall_dt, float ros_dt )
 
 void MapCloudDisplay::reset()
 {
-	MFDClass::reset();
 	{
 		boost::mutex::scoped_lock lock(new_clouds_mutex_);
 		cloud_infos_.clear();
@@ -726,6 +733,7 @@ void MapCloudDisplay::reset()
 		boost::mutex::scoped_lock lock(current_map_mutex_);
 		current_map_.clear();
 	}
+	MFDClass::reset();
 }
 
 void MapCloudDisplay::updateXyzTransformer()

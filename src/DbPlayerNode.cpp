@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,18 +29,25 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/image_encodings.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/LaserScan.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <nav_msgs/Odometry.h>
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
-#include <tf/tf.h>
-#include <tf/transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
 #include <std_srvs/Empty.h>
 #include <rtabmap_ros/MsgConversion.h>
+#include <rtabmap_ros/SetGoal.h>
 #include <rtabmap/utilite/ULogger.h>
+#include <rtabmap/utilite/UStl.h>
+#include <rtabmap/utilite/UThread.h>
+#include <rtabmap/utilite/UDirectory.h>
+#include <rtabmap/utilite/UConversion.h>
 #include <rtabmap/core/util3d.h>
 #include <rtabmap/core/DBReader.h>
+#include <rtabmap/core/OdometryEvent.h>
+#include <cmath>
 
 bool paused = false;
 bool pauseCallback(std_srvs::Empty::Request&, std_srvs::Empty::Response&)
@@ -86,7 +93,8 @@ int main(int argc, char** argv)
 	std::string frameId = "base_link";
 	std::string odomFrameId = "odom";
 	std::string cameraFrameId = "camera_optical_link";
-	double rate = 1.0f;
+	std::string scanFrameId = "base_laser_link";
+	double rate = -1.0f;
 	std::string databasePath = "";
 	bool publishTf = true;
 	int startId = 0;
@@ -94,27 +102,44 @@ int main(int argc, char** argv)
 	pnh.param("frame_id", frameId, frameId);
 	pnh.param("odom_frame_id", odomFrameId, odomFrameId);
 	pnh.param("camera_frame_id", cameraFrameId, cameraFrameId);
-	pnh.param("rate", rate, rate);
+	pnh.param("scan_frame_id", scanFrameId, scanFrameId);
+	pnh.param("rate", rate, rate); // Set -1 to use database stamps
 	pnh.param("database", databasePath, databasePath);
 	pnh.param("publish_tf", publishTf, publishTf);
 	pnh.param("start_id", startId, startId);
 
+	// based on URG-04LX
+	double scanHeight, scanAngleMin, scanAngleMax, scanAngleIncrement, scanTime, scanRangeMin, scanRangeMax;
+	pnh.param<double>("scan_height", scanHeight, 0.3);
+	pnh.param<double>("scan_angle_min", scanAngleMin, -M_PI / 2.0);
+	pnh.param<double>("scan_angle_max", scanAngleMax, M_PI / 2.0);
+	pnh.param<double>("scan_angle_increment", scanAngleIncrement, M_PI / 360.0);
+	pnh.param<double>("scan_time", scanTime, 1.0 / 10.0);
+	pnh.param<double>("scan_range_min", scanRangeMin, 0.02);
+	pnh.param<double>("scan_range_max", scanRangeMax, 6.0);
+
 	ROS_INFO("frame_id = %s", frameId.c_str());
 	ROS_INFO("odom_frame_id = %s", odomFrameId.c_str());
 	ROS_INFO("camera_frame_id = %s", cameraFrameId.c_str());
-	ROS_INFO("database = %s", databasePath.c_str());
+	ROS_INFO("scan_frame_id = %s", scanFrameId.c_str());
 	ROS_INFO("rate = %f", rate);
 	ROS_INFO("publish_tf = %s", publishTf?"true":"false");
-
-	rtabmap::DBReader reader(databasePath, rate);
+	ROS_INFO("start_id = %d", startId);
 
 	if(databasePath.empty())
 	{
 		ROS_ERROR("Parameter \"database\" must be set (path to a RTAB-Map database).");
 		return -1;
 	}
+	databasePath = uReplaceChar(databasePath, '~', UDirectory::homeDir());
+	if(databasePath.size() && databasePath.at(0) != '/')
+	{
+		databasePath = UDirectory::currentDir(true) + databasePath;
+	}
+	ROS_INFO("database = %s", databasePath.c_str());
 
-	if(!reader.init(startId))
+	rtabmap::DBReader reader(databasePath, rate, false, false, false, startId);
+	if(!reader.init())
 	{
 		ROS_ERROR("Cannot open database \"%s\".", databasePath.c_str());
 		return -1;
@@ -135,12 +160,16 @@ int main(int argc, char** argv)
 	ros::Publisher rightCamInfoPub;
 	ros::Publisher odometryPub;
 	ros::Publisher scanPub;
-	tf::TransformBroadcaster tfBroadcaster;
+	tf2_ros::TransformBroadcaster tfBroadcaster;
 
-	rtabmap::SensorData data = reader.getNextData();
-	while(ros::ok() && data.isValid())
+	UTimer timer;
+	rtabmap::CameraInfo info;
+	rtabmap::SensorData data = reader.takeImage(&info);
+	rtabmap::OdometryEvent odom(data, info.odomPose, info.odomCovariance);
+	double acquisitionTime = timer.ticks();
+	while(ros::ok() && odom.data().id())
 	{
-		ROS_INFO("Reading sensor data %d...", data.id());
+		ROS_INFO("Reading sensor data %d...", odom.data().id());
 
 		ros::Time time = ros::Time::now();
 
@@ -160,45 +189,58 @@ int main(int argc, char** argv)
 		camInfoB = camInfoA;
 
 		int type = -1;
-		if(!data.depth().empty() && (data.depth().type() == CV_32FC1 || data.depth().type() == CV_16UC1))
+		if(!odom.data().depthRaw().empty() && (odom.data().depthRaw().type() == CV_32FC1 || odom.data().depthRaw().type() == CV_16UC1))
 		{
-			//depth
-			camInfoA.D.resize(5,0);
+			if(odom.data().cameraModels().size() > 1)
+			{
+				ROS_WARN("Multi-cameras detected in database but this node cannot send multi-images yet...");
+			}
+			else
+			{
+				//depth
+				if(odom.data().cameraModels().size())
+				{
+					camInfoA.D.resize(5,0);
 
-			camInfoA.P[0] = data.fx();
-			camInfoA.K[0] = data.fx();
-			camInfoA.P[5] = data.fy();
-			camInfoA.K[4] = data.fy();
-			camInfoA.P[2] = data.cx();
-			camInfoA.K[2] = data.cx();
-			camInfoA.P[6] = data.cy();
-			camInfoA.K[5] = data.cy();
+					camInfoA.P[0] = odom.data().cameraModels()[0].fx();
+					camInfoA.K[0] = odom.data().cameraModels()[0].fx();
+					camInfoA.P[5] = odom.data().cameraModels()[0].fy();
+					camInfoA.K[4] = odom.data().cameraModels()[0].fy();
+					camInfoA.P[2] = odom.data().cameraModels()[0].cx();
+					camInfoA.K[2] = odom.data().cameraModels()[0].cx();
+					camInfoA.P[6] = odom.data().cameraModels()[0].cy();
+					camInfoA.K[5] = odom.data().cameraModels()[0].cy();
 
-			camInfoB = camInfoA;
+					camInfoB = camInfoA;
+				}
 
-			type=0;
+				type=0;
 
-			if(rgbPub.getTopic().empty()) rgbPub = it.advertise("rgb/image", 1);
-			if(depthPub.getTopic().empty()) depthPub = it.advertise("depth_registered/image", 1);
-			if(rgbCamInfoPub.getTopic().empty()) rgbCamInfoPub = nh.advertise<sensor_msgs::CameraInfo>("rgb/camera_info", 1);
-			if(depthCamInfoPub.getTopic().empty()) depthCamInfoPub = nh.advertise<sensor_msgs::CameraInfo>("depth_registered/camera_info", 1);
+				if(rgbPub.getTopic().empty()) rgbPub = it.advertise("rgb/image", 1);
+				if(depthPub.getTopic().empty()) depthPub = it.advertise("depth_registered/image", 1);
+				if(rgbCamInfoPub.getTopic().empty()) rgbCamInfoPub = nh.advertise<sensor_msgs::CameraInfo>("rgb/camera_info", 1);
+				if(depthCamInfoPub.getTopic().empty()) depthCamInfoPub = nh.advertise<sensor_msgs::CameraInfo>("depth_registered/camera_info", 1);
+			}
 		}
-		else if(!data.rightImage().empty() && data.rightImage().type() == CV_8U)
+		else if(!odom.data().rightRaw().empty() && odom.data().rightRaw().type() == CV_8U)
 		{
 			//stereo
-			camInfoA.D.resize(8,0);
+			if(odom.data().stereoCameraModel().isValidForProjection())
+			{
+				camInfoA.D.resize(8,0);
 
-			camInfoA.P[0] = data.fx();
-			camInfoA.K[0] = data.fx();
-			camInfoA.P[5] = data.fx(); // fx = fy
-			camInfoA.K[4] = data.fx(); // fx = fy
-			camInfoA.P[2] = data.cx();
-			camInfoA.K[2] = data.cx();
-			camInfoA.P[6] = data.cy();
-			camInfoA.K[5] = data.cy();
+				camInfoA.P[0] = odom.data().stereoCameraModel().left().fx();
+				camInfoA.K[0] = odom.data().stereoCameraModel().left().fx();
+				camInfoA.P[5] = odom.data().stereoCameraModel().left().fy();
+				camInfoA.K[4] = odom.data().stereoCameraModel().left().fy();
+				camInfoA.P[2] = odom.data().stereoCameraModel().left().cx();
+				camInfoA.K[2] = odom.data().stereoCameraModel().left().cx();
+				camInfoA.P[6] = odom.data().stereoCameraModel().left().cy();
+				camInfoA.K[5] = odom.data().stereoCameraModel().left().cy();
 
-			camInfoB = camInfoA;
-			camInfoB.P[3] = data.baseline()*-data.fx(); // Right_Tx = -baseline*fx
+				camInfoB = camInfoA;
+				camInfoB.P[3] = odom.data().stereoCameraModel().right().Tx(); // Right_Tx = -baseline*fx
+			}
 
 			type=1;
 
@@ -213,52 +255,74 @@ int main(int argc, char** argv)
 			if(imagePub.getTopic().empty()) imagePub = it.advertise("image", 1);
 		}
 
-		camInfoA.height = data.image().rows;
-		camInfoA.width = data.image().cols;
-		camInfoB.height = data.depthOrRightImage().rows;
-		camInfoB.width = data.depthOrRightImage().cols;
+		camInfoA.height = odom.data().imageRaw().rows;
+		camInfoA.width = odom.data().imageRaw().cols;
+		camInfoB.height = odom.data().depthOrRightRaw().rows;
+		camInfoB.width = odom.data().depthOrRightRaw().cols;
 
-		if(!data.laserScan().empty())
+		if(!odom.data().laserScanRaw().empty())
 		{
-			if(scanPub.getTopic().empty()) scanPub = nh.advertise<sensor_msgs::PointCloud2>("scan_cloud", 1);
+			if(scanPub.getTopic().empty()) scanPub = nh.advertise<sensor_msgs::LaserScan>("scan", 1);
 		}
 
 		// publish transforms first
 		if(publishTf)
 		{
-			ros::Time tfExpiration = time + ros::Duration(1.0/rate);
-			if(!data.localTransform().isNull())
+			rtabmap::Transform localTransform;
+			if(odom.data().cameraModels().size() == 1)
 			{
-				tf::Transform baseToCamera;
-				rtabmap_ros::transformToTF(data.localTransform(), baseToCamera);
-				tfBroadcaster.sendTransform( tf::StampedTransform (baseToCamera, tfExpiration, frameId, cameraFrameId));
+				localTransform = odom.data().cameraModels()[0].localTransform();
+			}
+			else if(odom.data().stereoCameraModel().isValidForProjection())
+			{
+				localTransform = odom.data().stereoCameraModel().left().localTransform();
+			}
+			if(!localTransform.isNull())
+			{
+				geometry_msgs::TransformStamped baseToCamera;
+				baseToCamera.child_frame_id = cameraFrameId;
+				baseToCamera.header.frame_id = frameId;
+				baseToCamera.header.stamp = time;
+				rtabmap_ros::transformToGeometryMsg(localTransform, baseToCamera.transform);
+				tfBroadcaster.sendTransform(baseToCamera);
 			}
 
-			if(!data.pose().isNull())
+			if(!odom.pose().isNull())
 			{
-				tf::Transform odomToBase;
-				rtabmap_ros::transformToTF(data.pose(), odomToBase);
-				tfBroadcaster.sendTransform( tf::StampedTransform (odomToBase, tfExpiration, odomFrameId, frameId));
+				geometry_msgs::TransformStamped odomToBase;
+				odomToBase.child_frame_id = frameId;
+				odomToBase.header.frame_id = odomFrameId;
+				odomToBase.header.stamp = time;
+				rtabmap_ros::transformToGeometryMsg(odom.pose(), odomToBase.transform);
+				tfBroadcaster.sendTransform(odomToBase);
+			}
+
+			if(!scanPub.getTopic().empty())
+			{
+				geometry_msgs::TransformStamped baseToLaserScan;
+				baseToLaserScan.child_frame_id = scanFrameId;
+				baseToLaserScan.header.frame_id = frameId;
+				baseToLaserScan.header.stamp = time;
+				rtabmap_ros::transformToGeometryMsg(rtabmap::Transform(0,0,scanHeight,0,0,0), baseToLaserScan.transform);
+				tfBroadcaster.sendTransform(baseToLaserScan);
 			}
 		}
-		if(!data.pose().isNull())
+		if(!odom.pose().isNull())
 		{
 			if(odometryPub.getTopic().empty()) odometryPub = nh.advertise<nav_msgs::Odometry>("odom", 1);
 
 			if(odometryPub.getNumSubscribers())
 			{
-				nav_msgs::Odometry odom;
-				odom.child_frame_id = frameId;
-				odom.header.frame_id = odomFrameId;
-				odom.header.stamp = time;
-				rtabmap_ros::transformToPoseMsg(data.pose(), odom.pose.pose);
-				odom.pose.covariance[0] = data.poseTransVariance();
-				odom.pose.covariance[7] = data.poseTransVariance();
-				odom.pose.covariance[14] = data.poseTransVariance();
-				odom.pose.covariance[21] = data.poseRotVariance();
-				odom.pose.covariance[28] = data.poseRotVariance();
-				odom.pose.covariance[35] = data.poseRotVariance();
-				odometryPub.publish(odom);
+				nav_msgs::Odometry odomMsg;
+				odomMsg.child_frame_id = frameId;
+				odomMsg.header.frame_id = odomFrameId;
+				odomMsg.header.stamp = time;
+				rtabmap_ros::transformToPoseMsg(odom.pose(), odomMsg.pose.pose);
+				UASSERT(odomMsg.pose.covariance.size() == 36 &&
+						odom.covariance().total() == 36 &&
+						odom.covariance().type() == CV_64FC1);
+				memcpy(odomMsg.pose.covariance.begin(), odom.covariance().data, 36*sizeof(double));
+				odometryPub.publish(odomMsg);
 			}
 		}
 
@@ -285,7 +349,7 @@ int main(int argc, char** argv)
 		if(imagePub.getNumSubscribers() || rgbPub.getNumSubscribers() || leftPub.getNumSubscribers())
 		{
 			cv_bridge::CvImage img;
-			if(data.image().channels() == 1)
+			if(odom.data().imageRaw().channels() == 1)
 			{
 				img.encoding = sensor_msgs::image_encodings::MONO8;
 			}
@@ -293,7 +357,7 @@ int main(int argc, char** argv)
 			{
 				img.encoding = sensor_msgs::image_encodings::BGR8;
 			}
-			img.image = data.image();
+			img.image = odom.data().imageRaw();
 			sensor_msgs::ImagePtr imageRosMsg = img.toImageMsg();
 			imageRosMsg->header.frame_id = cameraFrameId;
 			imageRosMsg->header.stamp = time;
@@ -313,10 +377,10 @@ int main(int argc, char** argv)
 			}
 		}
 
-		if(depthPub.getNumSubscribers() && !data.depth().empty() && type==0)
+		if(depthPub.getNumSubscribers() && !odom.data().depthRaw().empty() && type==0)
 		{
 			cv_bridge::CvImage img;
-			if(data.depth().type() == CV_32FC1)
+			if(odom.data().depthRaw().type() == CV_32FC1)
 			{
 				img.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
 			}
@@ -324,7 +388,7 @@ int main(int argc, char** argv)
 			{
 				img.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
 			}
-			img.image = data.depth();
+			img.image = odom.data().depthRaw();
 			sensor_msgs::ImagePtr imageRosMsg = img.toImageMsg();
 			imageRosMsg->header.frame_id = cameraFrameId;
 			imageRosMsg->header.stamp = time;
@@ -333,11 +397,11 @@ int main(int argc, char** argv)
 			depthCamInfoPub.publish(camInfoB);
 		}
 
-		if(rightPub.getNumSubscribers() && !data.rightImage().empty() && type==1)
+		if(rightPub.getNumSubscribers() && !odom.data().rightRaw().empty() && type==1)
 		{
 			cv_bridge::CvImage img;
 			img.encoding = sensor_msgs::image_encodings::MONO8;
-			img.image = data.rightImage();
+			img.image = odom.data().rightRaw();
 			sensor_msgs::ImagePtr imageRosMsg = img.toImageMsg();
 			imageRosMsg->header.frame_id = cameraFrameId;
 			imageRosMsg->header.stamp = time;
@@ -346,14 +410,75 @@ int main(int argc, char** argv)
 			rightCamInfoPub.publish(camInfoB);
 		}
 
-		if(scanPub.getNumSubscribers() && !data.laserScan().empty())
+		if(scanPub.getNumSubscribers() && !odom.data().laserScanRaw().empty())
 		{
-			pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = rtabmap::util3d::laserScanToPointCloud(data.laserScan());
-			sensor_msgs::PointCloud2 msg;
-			pcl::toROSMsg(*cloud, msg);
-			msg.header.frame_id = frameId;
+			//inspired from pointcloud_to_laserscan package
+			sensor_msgs::LaserScan msg;
+			msg.header.frame_id = scanFrameId;
 			msg.header.stamp = time;
+
+			msg.angle_min = scanAngleMin;
+			msg.angle_max = scanAngleMax;
+			msg.angle_increment = scanAngleIncrement;
+			msg.time_increment = 0.0;
+			msg.scan_time = scanTime;
+			msg.range_min = scanRangeMin;
+			msg.range_max = scanRangeMax;
+
+			uint32_t rangesSize = std::ceil((msg.angle_max - msg.angle_min) / msg.angle_increment);
+			msg.ranges.assign(rangesSize, 0.0);
+
+			const cv::Mat & scan = odom.data().laserScanRaw();
+			UASSERT(scan.type() == CV_32FC2 || scan.type() == CV_32FC3);
+			UASSERT(scan.rows == 1);
+			for (int i=0; i<scan.cols; ++i)
+			{
+				cv::Vec2f pos = scan.at<cv::Vec2f>(i);
+				double range = hypot(pos[0], pos[1]);
+				if (range >= scanRangeMin && range <=scanRangeMax)
+				{
+					double angle = atan2(pos[1], pos[0]);
+					if (angle >= msg.angle_min && angle <= msg.angle_max)
+					{
+						int index = (angle - msg.angle_min) / msg.angle_increment;
+						if (index>=0 && index<rangesSize && (range < msg.ranges[index] || msg.ranges[index]==0))
+						{
+							msg.ranges[index] = range;
+						}
+					}
+				}
+			}
+
 			scanPub.publish(msg);
+		}
+
+		if(odom.data().userDataRaw().type() == CV_8SC1 &&
+		   odom.data().userDataRaw().cols >= 7 && // including null str ending
+		   odom.data().userDataRaw().rows == 1 &&
+		   memcmp(odom.data().userDataRaw().data, "GOAL:", 5) == 0)
+		{
+			//GOAL format detected, remove it from the user data and send it as goal event
+			std::string goalStr = (const char *)odom.data().userDataRaw().data;
+			if(!goalStr.empty())
+			{
+				std::list<std::string> strs = uSplit(goalStr, ':');
+				if(strs.size() == 2)
+				{
+					int goalId = atoi(strs.rbegin()->c_str());
+
+					if(goalId > 0)
+					{
+						ROS_WARN("Goal %d detected, calling rtabmap's set_goal service!", goalId);
+						rtabmap_ros::SetGoal setGoalSrv;
+						setGoalSrv.request.node_id = goalId;
+						setGoalSrv.request.node_label = "";
+						if(!ros::service::call("set_goal", setGoalSrv))
+						{
+							ROS_ERROR("Can't call \"set_goal\" service");
+						}
+					}
+				}
+			}
 		}
 
 		ros::spinOnce();
@@ -364,7 +489,11 @@ int main(int argc, char** argv)
 			ros::spinOnce();
 		}
 
-		data = reader.getNextData();
+		timer.restart();
+		info = rtabmap::CameraInfo();
+		data = reader.takeImage(&info);
+		odom = rtabmap::OdometryEvent(data, info.odomPose, info.odomCovariance);
+		acquisitionTime = timer.ticks();
 	}
 
 

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,7 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef MAP_GRAPH_DISPLAY_H
 #define MAP_GRAPH_DISPLAY_H
 
-#include <rtabmap_ros/MapData.h>
+#include <rtabmap_ros/MapGraph.h>
 
 #include <rviz/message_filter_display.h>
 
@@ -51,9 +51,9 @@ namespace rtabmap_ros
 
 /**
  * \class MapGraphDisplay
- * \brief Displays the graph in rtabmap::MapData message
+ * \brief Displays the graph of rtabmap::MapGraph message
  */
-class MapGraphDisplay: public MessageFilterDisplay<rtabmap_ros::MapData>
+class MapGraphDisplay: public MessageFilterDisplay<rtabmap_ros::MapGraph>
 {
 Q_OBJECT
 public:
@@ -68,7 +68,7 @@ protected:
   virtual void onInitialize();
 
   /** @brief Overridden from MessageFilterDisplay. */
-  void processMessage( const rtabmap_ros::MapData::ConstPtr& msg );
+  void processMessage( const rtabmap_ros::MapGraph::ConstPtr& msg );
 
 private:
   void destroyObjects();
@@ -76,6 +76,7 @@ private:
   std::vector<Ogre::ManualObject*> manual_objects_;
 
   ColorProperty* color_neighbor_property_;
+  ColorProperty* color_neighbor_merged_property_;
   ColorProperty* color_global_property_;
   ColorProperty* color_local_property_;
   ColorProperty* color_user_property_;

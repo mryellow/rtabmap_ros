@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -52,7 +52,9 @@ namespace rtabmap_ros
 MapGraphDisplay::MapGraphDisplay()
 {
 	color_neighbor_property_ = new rviz::ColorProperty( "Neighbor", Qt::blue,
-                                       "Color to draw neighbor links.", this );
+	                                       "Color to draw neighbor links.", this );
+	color_neighbor_merged_property_ = new rviz::ColorProperty( "Merged neighbor", QColor(255,170,0),
+	                                       "Color to draw merged neighbor links.", this );
 	color_global_property_ = new rviz::ColorProperty( "Global loop closure", Qt::red,
 	                                       "Color to draw global loop closure links.", this );
 	color_local_property_ = new rviz::ColorProperty( "Local loop closure", Qt::yellow,
@@ -93,23 +95,19 @@ void MapGraphDisplay::destroyObjects()
 	manual_objects_.clear();
 }
 
-void MapGraphDisplay::processMessage( const rtabmap_ros::MapData::ConstPtr& msg )
+void MapGraphDisplay::processMessage( const rtabmap_ros::MapGraph::ConstPtr& msg )
 {
-	if(!(msg->graph.mapIds.size() == msg->graph.nodeIds.size() && msg->graph.poses.size() == msg->graph.nodeIds.size()))
+	if(!(msg->poses.size() == msg->posesId.size()))
 	{
-		ROS_ERROR("rtabmap_ros::MapGraph: Error map ids, pose ids and poses must have all the same size.");
+		ROS_ERROR("rtabmap_ros::MapGraph: Error pose ids and poses must have all the same size.");
 		return;
 	}
 
 	// Get links
 	std::map<int, rtabmap::Transform> poses;
-	std::map<int, int> mapIds;
-	std::map<int,  double> stamps;
-	std::map<int, std::string> labels;
-	std::map<int, std::vector<unsigned char> > userDatas;
 	std::multimap<int, rtabmap::Link> links;
 	rtabmap::Transform mapToOdom;
-	rtabmap_ros::mapGraphFromROS(msg->graph, poses, mapIds, stamps, labels, userDatas, links, mapToOdom);
+	rtabmap_ros::mapGraphFromROS(*msg, poses, links, mapToOdom);
 
 	destroyObjects();
 
@@ -142,6 +140,10 @@ void MapGraphDisplay::processMessage( const rtabmap_ros::MapData::ConstPtr& msg 
 				if(iter->second.type() == rtabmap::Link::kNeighbor)
 				{
 					color = color_neighbor_property_->getOgreColor();
+				}
+				else if(iter->second.type() == rtabmap::Link::kNeighborMerged)
+				{
+					color = color_neighbor_merged_property_->getOgreColor();
 				}
 				else if(iter->second.type() == rtabmap::Link::kVirtualClosure)
 				{

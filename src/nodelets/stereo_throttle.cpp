@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -40,7 +40,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <cv_bridge/cv_bridge.h>
 
-#include <rtabmap/core/util3d.h>
+#include <rtabmap/core/util2d.h>
 
 namespace rtabmap_ros
 {
@@ -93,9 +93,9 @@ private:
 		pnh.param("queue_size", queueSize, queueSize);
 		pnh.param("decimation", decimation_, decimation_);
 		ROS_ASSERT(decimation_ >= 1);
-		ROS_INFO("Rate=%f Hz", rate_);
-		ROS_INFO("Decimation=%d", decimation_);
-		ROS_INFO("Approximate time sync = %s", approxSync?"true":"false");
+		NODELET_INFO("Rate=%f Hz", rate_);
+		NODELET_INFO("Decimation=%d", decimation_);
+		NODELET_INFO("Approximate time sync = %s", approxSync?"true":"false");
 
 		if(approxSync)
 		{
@@ -146,7 +146,7 @@ private:
 				cv_bridge::CvImage out;
 				out.header = imagePtr->header;
 				out.encoding = imagePtr->encoding;
-				out.image = rtabmap::util3d::decimate(imagePtr->image, decimation_);
+				out.image = rtabmap::util2d::decimate(imagePtr->image, decimation_);
 				imageLeftPub_.publish(out.toImageMsg());
 			}
 			else
@@ -162,7 +162,7 @@ private:
 				cv_bridge::CvImage out;
 				out.header = imagePtr->header;
 				out.encoding = imagePtr->encoding;
-				out.image = rtabmap::util3d::decimate(imagePtr->image, decimation_);
+				out.image = rtabmap::util2d::decimate(imagePtr->image, decimation_);
 				imageRightPub_.publish(out.toImageMsg());
 			}
 			else

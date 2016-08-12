@@ -2,14 +2,14 @@
 Header header
 
 ##################
-# Graph stuff
+# Optimized graph
 ##################
-
-Graph graph
+MapGraph graph
 
 ##################
-# Point cloud stuff
+# Graph data
 ##################
-
 NodeData[] nodes
+
+
 

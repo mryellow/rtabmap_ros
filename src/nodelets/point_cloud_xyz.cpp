@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,6 +29,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <pluginlib/class_list_macros.h>
 #include <nodelet/nodelet.h>
 
+#include <rtabmap_ros/MsgConversion.h>
+
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -52,6 +54,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opencv2/highgui/highgui.hpp>
 
 #include "rtabmap/core/util3d.h"
+#include "rtabmap/core/util3d_filtering.h"
+#include "rtabmap/core/Features2d.h"
+#include "rtabmap/utilite/UConversion.h"
+#include "rtabmap/utilite/UStl.h"
 
 namespace rtabmap_ros
 {
@@ -61,6 +67,7 @@ class PointCloudXYZ : public nodelet::Nodelet
 public:
 	PointCloudXYZ() :
 		maxDepth_(0.0),
+		minDepth_(0.0),
 		voxelSize_(0.0),
 		decimation_(1),
 		noiseFilterRadius_(0.0),
@@ -91,14 +98,67 @@ private:
 
 		int queueSize = 10;
 		bool approxSync = true;
+		std::string roiStr;
 		pnh.param("approx_sync", approxSync, approxSync);
 		pnh.param("queue_size", queueSize, queueSize);
 		pnh.param("max_depth", maxDepth_, maxDepth_);
+		pnh.param("min_depth", minDepth_, minDepth_);
 		pnh.param("voxel_size", voxelSize_, voxelSize_);
 		pnh.param("decimation", decimation_, decimation_);
 		pnh.param("noise_filter_radius", noiseFilterRadius_, noiseFilterRadius_);
 		pnh.param("noise_filter_min_neighbors", noiseFilterMinNeighbors_, noiseFilterMinNeighbors_);
-		ROS_INFO("Approximate time sync = %s", approxSync?"true":"false");
+		pnh.param("roi_ratios", roiStr, roiStr);
+
+		// Deprecated
+		if(pnh.hasParam("cut_left"))
+		{
+			ROS_ERROR("\"cut_left\" parameter is replaced by \"roi_ratios\". It will be ignored.");
+		}
+		if(pnh.hasParam("cut_right"))
+		{
+			ROS_ERROR("\"cut_right\" parameter is replaced by \"roi_ratios\". It will be ignored.");
+		}
+		if(pnh.hasParam("special_filter_close_object"))
+		{
+			ROS_ERROR("\"special_filter_close_object\" parameter is removed. This kind of processing "
+					  "should be done before or after this nodelet. See old implementation here: "
+					  "https://github.com/introlab/rtabmap_ros/blob/f0026b071c7c54fbcc71df778dd7e17f52f78fc4/src/nodelets/point_cloud_xyz.cpp#L178-L201.");
+		}
+
+		//parse roi (region of interest)
+		roiRatios_.resize(4, 0);
+		if(!roiStr.empty())
+		{
+			std::list<std::string> strValues = uSplit(roiStr, ' ');
+			if(strValues.size() != 4)
+			{
+				ROS_ERROR("The number of values must be 4 (\"roi_ratios\"=\"%s\")", roiStr.c_str());
+			}
+			else
+			{
+				std::vector<float> tmpValues(4);
+				unsigned int i=0;
+				for(std::list<std::string>::iterator jter = strValues.begin(); jter!=strValues.end(); ++jter)
+				{
+					tmpValues[i] = uStr2Float(*jter);
+					++i;
+				}
+
+				if(tmpValues[0] >= 0 && tmpValues[0] < 1 && tmpValues[0] < 1.0f-tmpValues[1] &&
+					tmpValues[1] >= 0 && tmpValues[1] < 1 && tmpValues[1] < 1.0f-tmpValues[0] &&
+					tmpValues[2] >= 0 && tmpValues[2] < 1 && tmpValues[2] < 1.0f-tmpValues[3] &&
+					tmpValues[3] >= 0 && tmpValues[3] < 1 && tmpValues[3] < 1.0f-tmpValues[2])
+				{
+					roiRatios_ = tmpValues;
+				}
+				else
+				{
+					ROS_ERROR("The roi ratios are not valid (\"roi_ratios\"=\"%s\")", roiStr.c_str());
+				}
+			}
+		}
+
+		NODELET_INFO("Approximate time sync = %s", approxSync?"true":"false");
 
 		if(approxSync)
 		{
@@ -136,33 +196,37 @@ private:
 			  const sensor_msgs::CameraInfoConstPtr& cameraInfo)
 	{
 		if(depth->encoding.compare(sensor_msgs::image_encodings::TYPE_16UC1)!=0 &&
-		   depth->encoding.compare(sensor_msgs::image_encodings::TYPE_32FC1)!=0)
+		   depth->encoding.compare(sensor_msgs::image_encodings::TYPE_32FC1)!=0 &&
+		   depth->encoding.compare(sensor_msgs::image_encodings::MONO16)!=0)
 		{
-			ROS_ERROR("Input type depth=32FC1,16UC1");
+			NODELET_ERROR("Input type depth=32FC1,16UC1,MONO16");
 			return;
 		}
 
 		if(cloudPub_.getNumSubscribers())
 		{
+			ros::WallTime time = ros::WallTime::now();
+
 			cv_bridge::CvImageConstPtr imageDepthPtr = cv_bridge::toCvShare(depth);
+			cv::Rect roi = rtabmap::Feature2D::computeRoi(imageDepthPtr->image, roiRatios_);
 
 			image_geometry::PinholeCameraModel model;
 			model.fromCameraInfo(*cameraInfo);
-			float fx = model.fx();
-			float fy = model.fy();
-			float cx = model.cx();
-			float cy = model.cy();
 
 			pcl::PointCloud<pcl::PointXYZ>::Ptr pclCloud;
-			pclCloud = rtabmap::util3d::cloudFromDepth(
-					imageDepthPtr->image,
-					cx,
-					cy,
-					fx,
-					fy,
-					decimation_);
+			rtabmap::CameraModel m(
+					model.fx(),
+					model.fy(),
+					model.cx()-roiRatios_[0]*double(imageDepthPtr->image.cols),
+					model.cy()-roiRatios_[2]*double(imageDepthPtr->image.rows));
 
+			pclCloud = rtabmap::util3d::cloudFromDepth(
+					cv::Mat(imageDepthPtr->image, roi),
+					m,
+					decimation_);
 			processAndPublish(pclCloud, depth->header);
+
+			NODELET_DEBUG("point_cloud_xyz from depth time = %f s", (ros::WallTime::now() - time).toSec());
 		}
 	}
 
@@ -173,7 +237,7 @@ private:
 		if(disparityMsg->image.encoding.compare(sensor_msgs::image_encodings::TYPE_32FC1) !=0 &&
 		   disparityMsg->image.encoding.compare(sensor_msgs::image_encodings::TYPE_16SC1) !=0)
 		{
-			ROS_ERROR("Input type must be disparity=32FC1 or 16SC1");
+			NODELET_ERROR("Input type must be disparity=32FC1 or 16SC1");
 			return;
 		}
 
@@ -189,42 +253,49 @@ private:
 
 		if(cloudPub_.getNumSubscribers())
 		{
-			image_geometry::PinholeCameraModel model;
-			model.fromCameraInfo(*cameraInfo);
-			float cx = model.cx();
-			float cy = model.cy();
+			ros::WallTime time = ros::WallTime::now();
+
+			cv::Rect roi = rtabmap::Feature2D::computeRoi(disparity, roiRatios_);
 
 			pcl::PointCloud<pcl::PointXYZ>::Ptr pclCloud;
+			rtabmap::CameraModel leftModel = rtabmap_ros::cameraModelFromROS(*cameraInfo);
+			rtabmap::StereoCameraModel stereoModel(disparityMsg->f, disparityMsg->f, leftModel.cx()-roiRatios_[0]*double(disparity.cols), leftModel.cy()-roiRatios_[2]*double(disparity.rows), disparityMsg->T);
 			pclCloud = rtabmap::util3d::cloudFromDisparity(
-					disparity,
-					cx,
-					cy,
-					disparityMsg->f,
-					disparityMsg->T,
+					cv::Mat(disparity, roi),
+					stereoModel,
 					decimation_);
 
 			processAndPublish(pclCloud, disparityMsg->header);
+
+			NODELET_DEBUG("point_cloud_xyz from disparity time = %f s", (ros::WallTime::now() - time).toSec());
 		}
 	}
 
 	void processAndPublish(pcl::PointCloud<pcl::PointXYZ>::Ptr & pclCloud, const std_msgs::Header & header)
 	{
-		if(pclCloud->size() && maxDepth_ > 0)
+		if(pclCloud->size() && (minDepth_ != 0.0 || maxDepth_ > minDepth_))
 		{
-			pclCloud = rtabmap::util3d::passThrough<pcl::PointXYZ>(pclCloud, "z", 0, maxDepth_);
-		}
-
-		if(pclCloud->size() && noiseFilterRadius_ > 0.0 && noiseFilterMinNeighbors_ > 0)
-		{
-			pcl::IndicesPtr indices = rtabmap::util3d::radiusFiltering<pcl::PointXYZ>(pclCloud, noiseFilterRadius_, noiseFilterMinNeighbors_);
-			pcl::PointCloud<pcl::PointXYZ>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZ>);
-			pcl::copyPointCloud(*pclCloud, *indices, *tmp);
-			pclCloud = tmp;
+			pclCloud = rtabmap::util3d::passThrough(pclCloud, "z", minDepth_, maxDepth_>minDepth_?maxDepth_:std::numeric_limits<float>::max());
 		}
 
 		if(pclCloud->size() && voxelSize_ > 0.0)
 		{
-			pclCloud = rtabmap::util3d::voxelize<pcl::PointXYZ>(pclCloud, voxelSize_);
+			pclCloud = rtabmap::util3d::voxelize(pclCloud, voxelSize_);
+		}
+
+		// Do radius filtering after voxel filtering ( a lot faster)
+		if(pclCloud->size() && noiseFilterRadius_ > 0.0 && noiseFilterMinNeighbors_ > 0)
+		{
+			if(voxelSize_ <= 0.0 && !(minDepth_ != 0.0 || maxDepth_ > minDepth_))
+			{
+				// remove NaN values
+				pclCloud = rtabmap::util3d::removeNaNFromPointCloud(pclCloud);
+			}
+
+			pcl::IndicesPtr indices = rtabmap::util3d::radiusFiltering(pclCloud, noiseFilterRadius_, noiseFilterMinNeighbors_);
+			pcl::PointCloud<pcl::PointXYZ>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZ>);
+			pcl::copyPointCloud(*pclCloud, *indices, *tmp);
+			pclCloud = tmp;
 		}
 
 		sensor_msgs::PointCloud2 rosCloud;
@@ -239,10 +310,12 @@ private:
 private:
 
 	double maxDepth_;
+	double minDepth_;
 	double voxelSize_;
 	int decimation_;
 	double noiseFilterRadius_;
 	int noiseFilterMinNeighbors_;
+	std::vector<float> roiRatios_;
 
 	ros::Publisher cloudPub_;
 

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -40,15 +40,15 @@ public:
 	virtual ~PreferencesDialogROS();
 
 	virtual QString getIniFilePath() const;
+	virtual QString getTmpIniFilePath() const;
 
 protected:
 	virtual QString getParamMessage();
 
 	virtual void readCameraSettings(const QString & filePath);
 	virtual bool readCoreSettings(const QString & filePath);
-	virtual void writeSettings(const QString & filePath);
-
-	virtual QString getTmpIniFilePath() const;
+	virtual void writeCameraSettings(const QString & filePath) const {}
+	virtual void writeCoreSettings(const QString & filePath) const;
 
 private:
 	QString configFile_;

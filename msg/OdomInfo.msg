@@ -19,8 +19,8 @@ Header header
 #    std::vector<int> wordInliers;
 #
 #    // Optical Flow odometry
-#    std::vector<cv::KeyPoint> refCorners;
-#    std::vector<cv::KeyPoint> newCorners;
+#    std::vector<cv::Point2f> refCorners;
+#    std::vector<cv::Point2f> newCorners;
 #    std::vector<int> cornerInliers;
 #}
 
@@ -30,7 +30,11 @@ int32 inliers
 float32 variance
 int32 features
 int32 localMapSize
-float32 time
+float32 timeEstimation
+float32 timeParticleFiltering
+float32 stamp
+float32 interval
+float32 distanceTravelled
 
 int32 type
 
@@ -38,8 +42,13 @@ int32[] wordsKeys
 KeyPoint[] wordsValues
 int32[] wordMatches
 int32[] wordInliers
+int32[] localMapKeys
+Point3f[] localMapValues
 
-KeyPoint[] refCorners
-KeyPoint[] newCorners
+Point2f[] refCorners
+Point2f[] newCorners
 int32[] cornerInliers
+
+geometry_msgs/Transform transform
+geometry_msgs/Transform transformFiltered
 

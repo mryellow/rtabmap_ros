@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/utilite/UDirectory.h>
 #include <rtabmap/utilite/UStl.h>
 #include <rtabmap/utilite/UFile.h>
+#include <rtabmap/core/Version.h>
 
 int main(int argc, char** argv)
 {
@@ -46,14 +47,6 @@ int main(int argc, char** argv)
 		if(strcmp(argv[i], "--delete_db_on_start") == 0)
 		{
 			deleteDbOnStart = true;
-		}
-		else if(strcmp(argv[i], "--udebug") == 0)
-		{
-			ULogger::setLevel(ULogger::kDebug);
-		}
-		else if(strcmp(argv[i], "--uinfo") == 0)
-		{
-			ULogger::setLevel(ULogger::kInfo);
 		}
 		else if(strcmp(argv[i], "--params") == 0 || strcmp(argv[i], "--params-all") == 0)
 		{
@@ -93,16 +86,13 @@ int main(int argc, char** argv)
 					 "argument \"--params\" is detected!");
 			exit(0);
 		}
-		else
-		{
-			ROS_ERROR("Not recognized argument \"%s\"", argv[i]);
-			exit(-1);
-		}
 	}
 
-	CoreWrapper * rtabmap = new CoreWrapper(deleteDbOnStart);
+	rtabmap::ParametersMap parameters = rtabmap::Parameters::parseArguments(argc, argv);
 
-	ROS_INFO("rtabmap started...");
+	CoreWrapper * rtabmap = new CoreWrapper(deleteDbOnStart, parameters);
+
+	ROS_INFO("rtabmap %s started...", RTABMAP_VERSION);
 	ros::spin();
 
 	delete rtabmap;
