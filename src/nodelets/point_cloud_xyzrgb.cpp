@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -33,6 +33,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <rtabmap_ros/MsgConversion.h>
+
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/image_encodings.h>
@@ -52,6 +54,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opencv2/highgui/highgui.hpp>
 
 #include "rtabmap/core/util3d.h"
+#include "rtabmap/core/util3d_filtering.h"
+#include "rtabmap/core/Features2d.h"
+#include "rtabmap/utilite/UConversion.h"
+#include "rtabmap/utilite/UStl.h"
 
 namespace rtabmap_ros
 {
@@ -61,6 +67,7 @@ class PointCloudXYZRGB : public nodelet::Nodelet
 public:
 	PointCloudXYZRGB() :
 		maxDepth_(0.0),
+		minDepth_(0.0),
 		voxelSize_(0.0),
 		decimation_(1),
 		noiseFilterRadius_(0.0),
@@ -91,15 +98,51 @@ private:
 
 		int queueSize = 10;
 		bool approxSync = true;
+		std::string roiStr;
 		pnh.param("approx_sync", approxSync, approxSync);
 		pnh.param("queue_size", queueSize, queueSize);
 		pnh.param("max_depth", maxDepth_, maxDepth_);
+		pnh.param("min_depth", minDepth_, minDepth_);
 		pnh.param("voxel_size", voxelSize_, voxelSize_);
 		pnh.param("decimation", decimation_, decimation_);
 		pnh.param("noise_filter_radius", noiseFilterRadius_, noiseFilterRadius_);
 		pnh.param("noise_filter_min_neighbors", noiseFilterMinNeighbors_, noiseFilterMinNeighbors_);
+		pnh.param("roi_ratios", roiStr, roiStr);
 
-		ROS_INFO("Approximate time sync = %s", approxSync?"true":"false");
+		//parse roi (region of interest)
+		roiRatios_.resize(4, 0);
+		if(!roiStr.empty())
+		{
+			std::list<std::string> strValues = uSplit(roiStr, ' ');
+			if(strValues.size() != 4)
+			{
+				ROS_ERROR("The number of values must be 4 (\"roi_ratios\"=\"%s\")", roiStr.c_str());
+			}
+			else
+			{
+				std::vector<float> tmpValues(4);
+				unsigned int i=0;
+				for(std::list<std::string>::iterator jter = strValues.begin(); jter!=strValues.end(); ++jter)
+				{
+					tmpValues[i] = uStr2Float(*jter);
+					++i;
+				}
+
+				if(tmpValues[0] >= 0 && tmpValues[0] < 1 && tmpValues[0] < 1.0f-tmpValues[1] &&
+					tmpValues[1] >= 0 && tmpValues[1] < 1 && tmpValues[1] < 1.0f-tmpValues[0] &&
+					tmpValues[2] >= 0 && tmpValues[2] < 1 && tmpValues[2] < 1.0f-tmpValues[3] &&
+					tmpValues[3] >= 0 && tmpValues[3] < 1 && tmpValues[3] < 1.0f-tmpValues[2])
+				{
+					roiRatios_ = tmpValues;
+				}
+				else
+				{
+					ROS_ERROR("The roi ratios are not valid (\"roi_ratios\"=\"%s\")", roiStr.c_str());
+				}
+			}
+		}
+
+		NODELET_INFO("Approximate time sync = %s", approxSync?"true":"false");
 
 		cloudPub_ = nh.advertise<sensor_msgs::PointCloud2>("cloud", 1);
 
@@ -155,41 +198,64 @@ private:
 			  const sensor_msgs::ImageConstPtr& imageDepth,
 			  const sensor_msgs::CameraInfoConstPtr& cameraInfo)
 	{
-		if(!(image->encoding.compare(sensor_msgs::image_encodings::MONO8) ==0 ||
+		if(!(image->encoding.compare(sensor_msgs::image_encodings::TYPE_8UC1) ==0 ||
+			image->encoding.compare(sensor_msgs::image_encodings::MONO8) ==0 ||
 			image->encoding.compare(sensor_msgs::image_encodings::MONO16) ==0 ||
 			image->encoding.compare(sensor_msgs::image_encodings::BGR8) == 0 ||
 			image->encoding.compare(sensor_msgs::image_encodings::RGB8) == 0) &&
-			(imageDepth->encoding.compare(sensor_msgs::image_encodings::TYPE_16UC1)!=0 ||
-			 imageDepth->encoding.compare(sensor_msgs::image_encodings::TYPE_32FC1)!=0))
+		   !(imageDepth->encoding.compare(sensor_msgs::image_encodings::TYPE_16UC1)==0 ||
+			 imageDepth->encoding.compare(sensor_msgs::image_encodings::TYPE_32FC1)==0 ||
+			 imageDepth->encoding.compare(sensor_msgs::image_encodings::MONO16)==0))
 		{
-			ROS_ERROR("Input type must be image=mono8,mono16,rgb8,bgr8 and image_depth=32FC1,16UC1");
+			NODELET_ERROR("Input type must be image=mono8,mono16,rgb8,bgr8 and image_depth=32FC1,16UC1,mono16");
 			return;
 		}
 
 		if(cloudPub_.getNumSubscribers())
 		{
-			cv_bridge::CvImageConstPtr imagePtr = cv_bridge::toCvShare(image, "bgr8");
+			ros::WallTime time = ros::WallTime::now();
+
+			cv_bridge::CvImageConstPtr imagePtr;
+			if(image->encoding.compare(sensor_msgs::image_encodings::TYPE_8UC1)==0)
+			{
+				imagePtr = cv_bridge::toCvShare(image);
+			}
+			else if(image->encoding.compare(sensor_msgs::image_encodings::MONO8) == 0 ||
+					image->encoding.compare(sensor_msgs::image_encodings::MONO16) == 0)
+			{
+				imagePtr = cv_bridge::toCvShare(image, "mono8");
+			}
+			else
+			{
+				imagePtr = cv_bridge::toCvShare(image, "bgr8");
+			}
+
 			cv_bridge::CvImageConstPtr imageDepthPtr = cv_bridge::toCvShare(imageDepth);
 
 			image_geometry::PinholeCameraModel model;
 			model.fromCameraInfo(*cameraInfo);
-			float fx = model.fx();
-			float fy = model.fy();
-			float cx = model.cx();
-			float cy = model.cy();
+
+			ROS_ASSERT(imageDepthPtr->image.cols == imagePtr->image.cols);
+			ROS_ASSERT(imageDepthPtr->image.rows == imagePtr->image.rows);
 
 			pcl::PointCloud<pcl::PointXYZRGB>::Ptr pclCloud;
+			cv::Rect roi = rtabmap::Feature2D::computeRoi(imageDepthPtr->image, roiRatios_);
+
+			rtabmap::CameraModel m(
+					model.fx(),
+					model.fy(),
+					model.cx()-roiRatios_[0]*double(imageDepthPtr->image.cols),
+					model.cy()-roiRatios_[2]*double(imageDepthPtr->image.rows));
 			pclCloud = rtabmap::util3d::cloudFromDepthRGB(
-					imagePtr->image,
-					imageDepthPtr->image,
-					cx,
-					cy,
-					fx,
-					fy,
+					cv::Mat(imagePtr->image, roi),
+					cv::Mat(imageDepthPtr->image, roi),
+					m,
 					decimation_);
 
 
 			processAndPublish(pclCloud, imagePtr->header);
+
+			NODELET_DEBUG("point_cloud_xyzrgb from RGB-D time = %f s", (ros::WallTime::now() - time).toSec());
 		}
 	}
 
@@ -207,12 +273,14 @@ private:
 				imageRight->encoding.compare(sensor_msgs::image_encodings::BGR8) == 0 ||
 				imageRight->encoding.compare(sensor_msgs::image_encodings::RGB8) == 0))
 		{
-			ROS_ERROR("Input type must be image=mono8,mono16,rgb8,bgr8 (enc=%s)", imageLeft->encoding.c_str());
+			NODELET_ERROR("Input type must be image=mono8,mono16,rgb8,bgr8 (enc=%s)", imageLeft->encoding.c_str());
 			return;
 		}
 
 		if(cloudPub_.getNumSubscribers())
 		{
+			ros::WallTime time = ros::WallTime::now();
+
 			cv_bridge::CvImageConstPtr ptrLeftImage, ptrRightImage;
 			if(imageLeft->encoding.compare(sensor_msgs::image_encodings::MONO8) == 0 ||
 				imageLeft->encoding.compare(sensor_msgs::image_encodings::MONO16) == 0)
@@ -225,46 +293,49 @@ private:
 			}
 			ptrRightImage = cv_bridge::toCvShare(imageRight, "mono8");
 
-			image_geometry::StereoCameraModel model;
-			model.fromCameraInfo(*camInfoLeft, *camInfoRight);
-
-			float fx = model.left().fx();
-			float cx = model.left().cx();
-			float cy = model.left().cy();
-			float baseline = model.baseline();
+			if(roiRatios_[0]!=0.0f || roiRatios_[1]!=0.0f || roiRatios_[2]!=0.0f || roiRatios_[3]!=0.0f)
+			{
+				ROS_WARN("\"roi_ratios\" set but ignored for stereo images.");
+			}
 
 			pcl::PointCloud<pcl::PointXYZRGB>::Ptr pclCloud;
 			pclCloud = rtabmap::util3d::cloudFromStereoImages(
 					ptrLeftImage->image,
 					ptrRightImage->image,
-					cx,
-					cy,
-					fx,
-					baseline,
+					rtabmap_ros::stereoCameraModelFromROS(*camInfoLeft, *camInfoRight),
 					decimation_);
 
 			processAndPublish(pclCloud, imageLeft->header);
+
+			NODELET_DEBUG("point_cloud_xyzrgb from stereo time = %f s", (ros::WallTime::now() - time).toSec());
 		}
 	}
 
 	void processAndPublish(pcl::PointCloud<pcl::PointXYZRGB>::Ptr & pclCloud, const std_msgs::Header & header)
 	{
-		if(pclCloud->size() && maxDepth_ > 0)
+		if(pclCloud->size() && (minDepth_ != 0.0 || maxDepth_ > minDepth_))
 		{
-			pclCloud = rtabmap::util3d::passThrough<pcl::PointXYZRGB>(pclCloud, "z", 0, maxDepth_);
-		}
-
-		if(pclCloud->size() && noiseFilterRadius_ > 0.0 && noiseFilterMinNeighbors_ > 0)
-		{
-			pcl::IndicesPtr indices = rtabmap::util3d::radiusFiltering<pcl::PointXYZRGB>(pclCloud, noiseFilterRadius_, noiseFilterMinNeighbors_);
-			pcl::PointCloud<pcl::PointXYZRGB>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZRGB>);
-			pcl::copyPointCloud(*pclCloud, *indices, *tmp);
-			pclCloud = tmp;
+			pclCloud = rtabmap::util3d::passThrough(pclCloud, "z", minDepth_, maxDepth_>minDepth_?maxDepth_:std::numeric_limits<float>::max());
 		}
 
 		if(pclCloud->size() && voxelSize_ > 0.0)
 		{
-			pclCloud = rtabmap::util3d::voxelize<pcl::PointXYZRGB>(pclCloud, voxelSize_);
+			pclCloud = rtabmap::util3d::voxelize(pclCloud, voxelSize_);
+		}
+
+		// Do radius filtering after voxel filtering ( a lot faster)
+		if(pclCloud->size() && noiseFilterRadius_ > 0.0 && noiseFilterMinNeighbors_ > 0)
+		{
+			if(voxelSize_ <= 0.0 && !(minDepth_ != 0.0 || maxDepth_ > minDepth_))
+			{
+				// remove NaN values
+				pclCloud = rtabmap::util3d::removeNaNFromPointCloud(pclCloud);
+			}
+
+			pcl::IndicesPtr indices = rtabmap::util3d::radiusFiltering(pclCloud, noiseFilterRadius_, noiseFilterMinNeighbors_);
+			pcl::PointCloud<pcl::PointXYZRGB>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZRGB>);
+			pcl::copyPointCloud(*pclCloud, *indices, *tmp);
+			pclCloud = tmp;
 		}
 
 		sensor_msgs::PointCloud2 rosCloud;
@@ -279,10 +350,12 @@ private:
 private:
 
 	double maxDepth_;
+	double minDepth_;
 	double voxelSize_;
 	int decimation_;
 	double noiseFilterRadius_;
 	int noiseFilterMinNeighbors_;
+	std::vector<float> roiRatios_;
 
 	ros::Publisher cloudPub_;
 

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,9 +29,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define ODOMETRYROS_H_
 
 #include <ros/ros.h>
+#include <nodelet/nodelet.h>
 
-#include <tf/tf.h>
-#include <tf/transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
 #include <tf/transform_listener.h>
 
 #include <std_srvs/Empty.h>
@@ -47,27 +47,38 @@ class Odometry;
 
 namespace rtabmap_ros {
 
-class OdometryROS
+class OdometryROS : public nodelet::Nodelet
 {
-public:
-	OdometryROS(int argc, char * argv[]);
-	~OdometryROS();
 
-	void processArguments(int argc, char * argv[]);
-	void processData(const rtabmap::SensorData & data, const std_msgs::Header & header);
+public:
+	OdometryROS(bool stereo);
+	virtual ~OdometryROS();
+
+	void processData(const rtabmap::SensorData & data, const ros::Time & stamp);
 
 	bool reset(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
 	bool resetToPose(rtabmap_ros::ResetPose::Request&, rtabmap_ros::ResetPose::Response&);
 	bool pause(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
 	bool resume(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogDebug(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogInfo(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogWarn(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogError(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
 
 	const std::string & frameId() const {return frameId_;}
 	const std::string & odomFrameId() const {return odomFrameId_;}
 	const rtabmap::ParametersMap & parameters() const {return parameters_;}
 	const tf::TransformListener & tfListener() const {return tfListener_;}
 	bool isPaused() const {return paused_;}
-	bool isOdometryBOW() const;
-	bool waitForTransform() const {return waitForTransform_;}
+	bool isOdometryF2M() const;
+	rtabmap::Transform getTransform(const std::string & fromFrameId, const std::string & toFrameId, const ros::Time & stamp) const;
+
+protected:
+	virtual void flushCallbacks() = 0;
+
+private:
+	virtual void onInit();
+	virtual void onOdomInit() = 0;
 
 private:
 	rtabmap::Odometry * odometry_;
@@ -78,6 +89,9 @@ private:
 	std::string groundTruthFrameId_;
 	bool publishTf_;
 	bool waitForTransform_;
+	double waitForTransformDuration_;
+	bool publishNullWhenLost_;
+	bool guessFromTf_;
 	rtabmap::ParametersMap parameters_;
 
 	ros::Publisher odomPub_;
@@ -88,10 +102,17 @@ private:
 	ros::ServiceServer resetToPoseSrv_;
 	ros::ServiceServer pauseSrv_;
 	ros::ServiceServer resumeSrv_;
-	tf::TransformBroadcaster tfBroadcaster_;
+	ros::ServiceServer setLogDebugSrv_;
+	ros::ServiceServer setLogInfoSrv_;
+	ros::ServiceServer setLogWarnSrv_;
+	ros::ServiceServer setLogErrorSrv_;
+	tf2_ros::TransformBroadcaster tfBroadcaster_;
 	tf::TransformListener tfListener_;
 
 	bool paused_;
+	int resetCountdown_;
+	int resetCurrentCount_;
+	bool stereo_;
 };
 
 }

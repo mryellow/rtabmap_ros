@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -31,13 +31,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <ros/ros.h>
 
-#include <tf/tf.h>
-#include <tf/transform_broadcaster.h>
-#include <tf/transform_listener.h>
-
 #include <std_srvs/Empty.h>
 
-#include <cv_bridge/cv_bridge.h>
+#include <tf/transform_listener.h>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include <std_msgs/Empty.h>
 #include <std_msgs/Int32.h>
@@ -47,9 +44,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sensor_msgs/LaserScan.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/GetMap.h>
-#include <octomap_msgs/GetOctomap.h>
 
-#include <rtabmap/core/Statistics.h>
 #include <rtabmap/core/Parameters.h>
 #include <rtabmap/core/Rtabmap.h>
 
@@ -60,6 +55,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap_ros/RejectLoop.h"
 #include "rtabmap_ros/SetGoal.h"
 #include "rtabmap_ros/SetLabel.h"
+#include "rtabmap_ros/Goal.h"
+
+#include "MapsManager.h"
 
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
@@ -69,8 +67,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <image_transport/image_transport.h>
 #include <image_transport/subscriber_filter.h>
 
-#include <pcl/point_types.h>
-#include <pcl/point_cloud.h>
+#ifdef WITH_OCTOMAP_ROS
+#include <octomap_msgs/GetOctomap.h>
+#endif
 
 #include <actionlib/client/simple_action_client.h>
 #include <move_base_msgs/MoveBaseAction.h>
@@ -80,37 +79,49 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <actionlib_msgs/GoalStatusArray.h>
 typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MoveBaseClient;
 
-namespace octomap{
-class OcTree;
-}
-
 class CoreWrapper
 {
 public:
-	CoreWrapper(bool deleteDbOnStart);
+	CoreWrapper(bool deleteDbOnStart, const rtabmap::ParametersMap & parameters);
 	virtual ~CoreWrapper();
 
 private:
-	void setupCallbacks(bool subscribeDepth, bool subscribeLaserScan, bool subscribeStereo, int queueSize, bool stereoApproxSync);
+	void setupCallbacks(
+			bool subscribeDepth,
+			bool subscribeScan2d,
+			bool subscribeScan3d,
+			bool subscribeStereo,
+			int queueSize,
+			bool approxSync,
+			int depthCameras);
 	void defaultCallback(const sensor_msgs::ImageConstPtr & imageMsg); // no odom
 
 	bool commonOdomUpdate(const nav_msgs::OdometryConstPtr & odomMsg);
 	bool commonOdomTFUpdate(const ros::Time & stamp); // TF odom
-	rtabmap::Transform getLocalTransform(const std::string & sensorFrameId, const ros::Time & stamp) const;
+	rtabmap::Transform getTransform(const std::string & fromFrameId, const std::string & toFrameId, const ros::Time & stamp) const;
 
 	void commonDepthCallback(
 				const std::string & odomFrameId,
 				const sensor_msgs::ImageConstPtr& imageMsg,
-				const sensor_msgs::ImageConstPtr& imageDepthMsg,
-				const sensor_msgs::CameraInfoConstPtr& camInfoMsg,
-				const sensor_msgs::LaserScanConstPtr& scanMsg);
+				const sensor_msgs::ImageConstPtr& depthMsg,
+				const sensor_msgs::CameraInfoConstPtr& cameraInfoMsg,
+				const sensor_msgs::LaserScanConstPtr& scanMsg,
+				const sensor_msgs::PointCloud2ConstPtr& scan3dMsg);
+	void commonDepthCallback(
+				const std::string & odomFrameId,
+				const std::vector<sensor_msgs::ImageConstPtr> & imageMsgs,
+				const std::vector<sensor_msgs::ImageConstPtr> & depthMsgs,
+				const std::vector<sensor_msgs::CameraInfoConstPtr> & cameraInfoMsgs,
+				const sensor_msgs::LaserScanConstPtr& scanMsg,
+				const sensor_msgs::PointCloud2ConstPtr& scan3dMsg);
 	void commonStereoCallback(
 				const std::string & odomFrameId,
 				const sensor_msgs::ImageConstPtr& leftImageMsg,
 				const sensor_msgs::ImageConstPtr& rightImageMsg,
 				const sensor_msgs::CameraInfoConstPtr& leftCamInfoMsg,
 				const sensor_msgs::CameraInfoConstPtr& rightCamInfoMsg,
-				const sensor_msgs::LaserScanConstPtr& scanMsg);
+				const sensor_msgs::LaserScanConstPtr& scanMsg,
+				const sensor_msgs::PointCloud2ConstPtr& scan3dMsg);
 
 	// with odom msg
 	void depthCallback(
@@ -124,6 +135,12 @@ private:
 			const sensor_msgs::ImageConstPtr& imageDepthMsg,
 			const sensor_msgs::CameraInfoConstPtr& camInfoMsg,
 			const sensor_msgs::LaserScanConstPtr& scanMsg);
+	void depthScan3dCallback(
+			const sensor_msgs::ImageConstPtr& imageMsg,
+			const nav_msgs::OdometryConstPtr & odomMsg,
+			const sensor_msgs::ImageConstPtr& imageDepthMsg,
+			const sensor_msgs::CameraInfoConstPtr& camInfoMsg,
+			const sensor_msgs::PointCloud2ConstPtr& scanMsg);
 	void stereoCallback(
 			const sensor_msgs::ImageConstPtr& leftImageMsg,
 			const sensor_msgs::ImageConstPtr& rightImageMsg,
@@ -137,6 +154,21 @@ private:
 			const sensor_msgs::CameraInfoConstPtr& rightCamInfoMsg,
 			const sensor_msgs::LaserScanConstPtr& scanMsg,
 			const nav_msgs::OdometryConstPtr & odomMsg);
+	void stereoScan3dCallback(
+			const sensor_msgs::ImageConstPtr& leftImageMsg,
+			const sensor_msgs::ImageConstPtr& rightImageMsg,
+			const sensor_msgs::CameraInfoConstPtr& leftCamInfoMsg,
+			const sensor_msgs::CameraInfoConstPtr& rightCamInfoMsg,
+			const sensor_msgs::PointCloud2ConstPtr& scanMsg,
+			const nav_msgs::OdometryConstPtr & odomMsg);
+	void depth2Callback(
+			const nav_msgs::OdometryConstPtr & odomMsg,
+			const sensor_msgs::ImageConstPtr& image1Msg,
+			const sensor_msgs::ImageConstPtr& imageDepth1Msg,
+			const sensor_msgs::CameraInfoConstPtr& camInfo1Msg,
+			const sensor_msgs::ImageConstPtr& image2Msg,
+			const sensor_msgs::ImageConstPtr& imageDept2hMsg,
+			const sensor_msgs::CameraInfoConstPtr& camInfo2Msg);
 
 	// without odom, when TF is used for odom
 	void depthTFCallback(
@@ -148,6 +180,11 @@ private:
 			const sensor_msgs::ImageConstPtr& imageDepthMsg,
 			const sensor_msgs::CameraInfoConstPtr& camInfoMsg,
 			const sensor_msgs::LaserScanConstPtr& scanMsg);
+	void depthScan3dTFCallback(
+			const sensor_msgs::ImageConstPtr& imageMsg,
+			const sensor_msgs::ImageConstPtr& imageDepthMsg,
+			const sensor_msgs::CameraInfoConstPtr& camInfoMsg,
+			const sensor_msgs::PointCloud2ConstPtr& scanMsg);
 	void stereoTFCallback(
 			const sensor_msgs::ImageConstPtr& leftImageMsg,
 			const sensor_msgs::ImageConstPtr& rightImageMsg,
@@ -159,27 +196,25 @@ private:
 			const sensor_msgs::CameraInfoConstPtr& leftCamInfoMsg,
 			const sensor_msgs::CameraInfoConstPtr& rightCamInfoMsg,
 			const sensor_msgs::LaserScanConstPtr& scanMsg);
+	void stereoScan3dTFCallback(
+			const sensor_msgs::ImageConstPtr& leftImageMsg,
+			const sensor_msgs::ImageConstPtr& rightImageMsg,
+			const sensor_msgs::CameraInfoConstPtr& leftCamInfoMsg,
+			const sensor_msgs::CameraInfoConstPtr& rightCamInfoMsg,
+			const sensor_msgs::PointCloud2ConstPtr& scanMsg);
 
-	void goalCommonCallback(const std::vector<std::pair<int, rtabmap::Transform> > & poses);
+	void goalCommonCallback(int id, const std::string & label, const rtabmap::Transform & pose, const ros::Time & stamp, double * planningTime = 0);
 	void goalCallback(const geometry_msgs::PoseStampedConstPtr & msg);
-	void goalGlobalCallback(const geometry_msgs::PoseStampedConstPtr & msg);
+	void goalNodeCallback(const rtabmap_ros::GoalConstPtr & msg);
 	void updateGoal(const ros::Time & stamp);
 
 	void process(
-			int id,
 			const ros::Time & stamp,
-			const cv::Mat & image,
+			const rtabmap::SensorData & data,
 			const rtabmap::Transform & odom = rtabmap::Transform(),
 			const std::string & odomFrameId = "",
-			float odomRotationalVariance = 1.0f,
-			float odomTransitionalVariance = 1.0f,
-			const cv::Mat & depthOrRightImage = cv::Mat(),
-			float fx = 0.0f,
-			float fyOrBaseline = 0.0f,
-			float cx = 0.0f,
-			float cy = 0.0f,
-			const rtabmap::Transform & localTransform = rtabmap::Transform(),
-			const cv::Mat & scan = cv::Mat());
+			float odomRotationalVariance = 1.0,
+			float odomTransitionalVariance = 1.0);
 
 	bool updateRtabmapCallback(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
 	bool resetRtabmapCallback(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
@@ -189,43 +224,47 @@ private:
 	bool backupDatabaseCallback(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
 	bool setModeLocalizationCallback(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
 	bool setModeMappingCallback(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogDebug(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogInfo(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogWarn(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
+	bool setLogError(std_srvs::Empty::Request&, std_srvs::Empty::Response&);
 	bool getMapCallback(rtabmap_ros::GetMap::Request& req, rtabmap_ros::GetMap::Response& res);
 	bool getProjMapCallback(nav_msgs::GetMap::Request  &req, nav_msgs::GetMap::Response &res);
 	bool getGridMapCallback(nav_msgs::GetMap::Request  &req, nav_msgs::GetMap::Response &res);
 	bool publishMapCallback(rtabmap_ros::PublishMap::Request&, rtabmap_ros::PublishMap::Response&);
 	bool setGoalCallback(rtabmap_ros::SetGoal::Request& req, rtabmap_ros::SetGoal::Response& res);
+	bool cancelGoalCallback(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res);
 	bool setLabelCallback(rtabmap_ros::SetLabel::Request& req, rtabmap_ros::SetLabel::Response& res);
 	bool listLabelsCallback(rtabmap_ros::ListLabels::Request& req, rtabmap_ros::ListLabels::Response& res);
+#ifdef WITH_OCTOMAP_ROS
 	bool octomapBinaryCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
 	bool octomapFullCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
+<<<<<<< HEAD
 	bool rejectLoopCallback(rtabmap_ros::RejectLoop::Request  &req, rtabmap_ros::RejectLoop::Response &res);
 	bool allowLoopCallback(rtabmap_ros::AllowLoop::Request  &req, rtabmap_ros::AllowLoop::Response &res);
+=======
+#endif
+>>>>>>> kinetic-devel
 
 	rtabmap::ParametersMap loadParameters(const std::string & configFile);
 	void saveParameters(const std::string & configFile);
 
-	void publishLoop(double tfDelay);
-
-	std::map<int, rtabmap::Transform> updateMapCaches(const std::map<int, rtabmap::Transform> & poses,
-			bool updateCloud,
-			bool updateProj,
-			bool updateGrid,
-			const std::map<int, rtabmap::Signature> & signatures = std::map<int, rtabmap::Signature>());
+	void publishLoop(double tfDelay, double tfTolerance);
 
 	void publishStats(const ros::Time & stamp);
-	void publishMaps(const std::map<int, rtabmap::Transform> & poses, const ros::Time & stamp);
 	void publishCurrentGoal(const ros::Time & stamp);
 	void goalDoneCb(const actionlib::SimpleClientGoalState& state, const move_base_msgs::MoveBaseResultConstPtr& result);
 	void goalActiveCb();
 	void goalFeedbackCb(const move_base_msgs::MoveBaseFeedbackConstPtr& feedback);
 	void publishLocalPath(const ros::Time & stamp);
-
-	octomap::OcTree * createOctomap();
+	void publishGlobalPath(const ros::Time & stamp);
 
 private:
 	rtabmap::Rtabmap rtabmap_;
 	bool paused_;
 	rtabmap::Transform lastPose_;
+	ros::Time lastPoseStamp_;
+	bool lastPoseIntermediate_;
 	float rotVariance_;
 	float transVariance_;
 	rtabmap::Transform currentMetricGoal_;
@@ -235,44 +274,32 @@ private:
 	std::string frameId_;
 	std::string mapFrameId_;
 	std::string odomFrameId_;
+	std::string groundTruthFrameId_;
 	std::string configPath_;
 	std::string databasePath_;
 	bool waitForTransform_;
+	double waitForTransformDuration_;
 	bool useActionForGoal_;
+	bool genScan_;
+	double genScanMaxDepth_;
+	double genScanMinDepth_;
+	int scanCloudMaxPoints_;
+	int scanCloudNormalK_;
+	bool flipScan_;
 
-	// mapping stuff
-	int cloudDecimation_;
-	double cloudMaxDepth_;
-	double cloudVoxelSize_;
-	bool cloudOutputVoxelized_;
-	double projMaxGroundAngle_;
-	int projMinClusterSize_;
-	double projMaxHeight_;
-	double gridCellSize_;
-	double gridSize_;
-	bool gridEroded_;
-	double mapFilterRadius_;
-	double mapFilterAngle_;
-	bool mapCacheCleanup_;
-
-	tf::Transform mapToOdom_;
+	rtabmap::Transform mapToOdom_;
 	boost::mutex mapToOdomMutex_;
 
-	std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr > clouds_;
-	std::map<int, std::pair<cv::Mat, cv::Mat> > projMaps_; // <ground, obstacles>
-	std::map<int, std::pair<cv::Mat, cv::Mat> > gridMaps_; // <ground, obstacles>
+	MapsManager mapsManager_;
 
 	ros::Publisher infoPub_;
 	ros::Publisher mapDataPub_;
 	ros::Publisher mapGraphPub_;
 	ros::Publisher labelsPub_;
-	ros::Publisher cloudMapPub_;
-	ros::Publisher projMapPub_;
-	ros::Publisher gridMapPub_;
 
 	//Planning stuff
 	ros::Subscriber goalSub_;
-	ros::Subscriber goalGlobalSub_;
+	ros::Subscriber goalNodeSub_;
 	ros::Publisher nextMetricGoalPub_;
 	ros::Publisher goalReachedPub_;
 	ros::Publisher globalPathPub_;
@@ -282,9 +309,9 @@ private:
 	image_transport::Subscriber defaultSub_;
 
 	//for depth callback
-	image_transport::SubscriberFilter imageSub_;
-	image_transport::SubscriberFilter imageDepthSub_;
-	message_filters::Subscriber<sensor_msgs::CameraInfo> cameraInfoSub_;
+	std::vector<image_transport::SubscriberFilter*> imageSubs_;
+	std::vector<image_transport::SubscriberFilter*> imageDepthSubs_;
+	std::vector<message_filters::Subscriber<sensor_msgs::CameraInfo>*> cameraInfoSubs_;
 
 	//stereo callback
 	image_transport::SubscriberFilter imageRectLeft_;
@@ -294,6 +321,7 @@ private:
 
 	message_filters::Subscriber<nav_msgs::Odometry> odomSub_;
 	message_filters::Subscriber<sensor_msgs::LaserScan> scanSub_;
+	message_filters::Subscriber<sensor_msgs::PointCloud2> scan3dSub_;
 
 	typedef message_filters::sync_policies::ApproximateTime<
 			sensor_msgs::Image,
@@ -307,8 +335,22 @@ private:
 			sensor_msgs::Image,
 			nav_msgs::Odometry,
 			sensor_msgs::Image,
+			sensor_msgs::CameraInfo,
+			sensor_msgs::PointCloud2> MyDepthScan3dSyncPolicy;
+	message_filters::Synchronizer<MyDepthScan3dSyncPolicy> * depthScan3dSync_;
+
+	typedef message_filters::sync_policies::ApproximateTime<
+			sensor_msgs::Image,
+			nav_msgs::Odometry,
+			sensor_msgs::Image,
 			sensor_msgs::CameraInfo> MyDepthSyncPolicy;
 	message_filters::Synchronizer<MyDepthSyncPolicy> * depthSync_;
+	typedef message_filters::sync_policies::ExactTime<
+			sensor_msgs::Image,
+			nav_msgs::Odometry,
+			sensor_msgs::Image,
+			sensor_msgs::CameraInfo> MyDepthExactSyncPolicy;
+	message_filters::Synchronizer<MyDepthExactSyncPolicy> * depthExactSync_;
 
 	typedef message_filters::sync_policies::ApproximateTime<
 			sensor_msgs::Image,
@@ -318,6 +360,15 @@ private:
 			sensor_msgs::LaserScan,
 			nav_msgs::Odometry> MyStereoScanSyncPolicy;
 	message_filters::Synchronizer<MyStereoScanSyncPolicy> * stereoScanSync_;
+
+	typedef message_filters::sync_policies::ApproximateTime<
+			sensor_msgs::Image,
+			sensor_msgs::Image,
+			sensor_msgs::CameraInfo,
+			sensor_msgs::CameraInfo,
+			sensor_msgs::PointCloud2,
+			nav_msgs::Odometry> MyStereoScan3dSyncPolicy;
+	message_filters::Synchronizer<MyStereoScan3dSyncPolicy> * stereoScan3dSync_;
 
 	typedef message_filters::sync_policies::ApproximateTime<
 			sensor_msgs::Image,
@@ -335,6 +386,16 @@ private:
 			nav_msgs::Odometry> MyStereoExactSyncPolicy;
 	message_filters::Synchronizer<MyStereoExactSyncPolicy> * stereoExactSync_;
 
+	typedef message_filters::sync_policies::ApproximateTime<
+			nav_msgs::Odometry,
+			sensor_msgs::Image,
+			sensor_msgs::Image,
+			sensor_msgs::CameraInfo,
+			sensor_msgs::Image,
+			sensor_msgs::Image,
+			sensor_msgs::CameraInfo> MyDepth2SyncPolicy;
+	message_filters::Synchronizer<MyDepth2SyncPolicy> * depth2Sync_;
+
 	// without odom, when TF is used for odom
 	typedef message_filters::sync_policies::ApproximateTime<
 			sensor_msgs::Image,
@@ -346,8 +407,20 @@ private:
 	typedef message_filters::sync_policies::ApproximateTime<
 			sensor_msgs::Image,
 			sensor_msgs::Image,
+			sensor_msgs::CameraInfo,
+			sensor_msgs::PointCloud2> MyDepthScan3dTFSyncPolicy;
+	message_filters::Synchronizer<MyDepthScan3dTFSyncPolicy> * depthScan3dTFSync_;
+
+	typedef message_filters::sync_policies::ApproximateTime<
+			sensor_msgs::Image,
+			sensor_msgs::Image,
 			sensor_msgs::CameraInfo> MyDepthTFSyncPolicy;
 	message_filters::Synchronizer<MyDepthTFSyncPolicy> * depthTFSync_;
+	typedef message_filters::sync_policies::ExactTime<
+				sensor_msgs::Image,
+				sensor_msgs::Image,
+				sensor_msgs::CameraInfo> MyDepthTFExactSyncPolicy;
+	message_filters::Synchronizer<MyDepthTFExactSyncPolicy> * depthTFExactSync_;
 
 	typedef message_filters::sync_policies::ApproximateTime<
 			sensor_msgs::Image,
@@ -356,6 +429,14 @@ private:
 			sensor_msgs::CameraInfo,
 			sensor_msgs::LaserScan> MyStereoScanTFSyncPolicy;
 	message_filters::Synchronizer<MyStereoScanTFSyncPolicy> * stereoScanTFSync_;
+
+	typedef message_filters::sync_policies::ApproximateTime<
+			sensor_msgs::Image,
+			sensor_msgs::Image,
+			sensor_msgs::CameraInfo,
+			sensor_msgs::CameraInfo,
+			sensor_msgs::PointCloud2> MyStereoScan3dTFSyncPolicy;
+	message_filters::Synchronizer<MyStereoScan3dTFSyncPolicy> * stereoScan3dTFSync_;
 
 	typedef message_filters::sync_policies::ApproximateTime<
 			sensor_msgs::Image,
@@ -371,7 +452,7 @@ private:
 			sensor_msgs::CameraInfo> MyStereoExactTFSyncPolicy;
 	message_filters::Synchronizer<MyStereoExactTFSyncPolicy> * stereoExactTFSync_;
 
-	tf::TransformBroadcaster tfBroadcaster_;
+	tf2_ros::TransformBroadcaster tfBroadcaster_;
 	tf::TransformListener tfListener_;
 
 	ros::ServiceServer updateSrv_;
@@ -382,24 +463,37 @@ private:
 	ros::ServiceServer backupDatabase_;
 	ros::ServiceServer setModeLocalizationSrv_;
 	ros::ServiceServer setModeMappingSrv_;
+	ros::ServiceServer setLogDebugSrv_;
+	ros::ServiceServer setLogInfoSrv_;
+	ros::ServiceServer setLogWarnSrv_;
+	ros::ServiceServer setLogErrorSrv_;
 	ros::ServiceServer getMapDataSrv_;
 	ros::ServiceServer getProjMapSrv_;
 	ros::ServiceServer getGridMapSrv_;
 	ros::ServiceServer publishMapDataSrv_;
 	ros::ServiceServer setGoalSrv_;
+	ros::ServiceServer cancelGoalSrv_;
 	ros::ServiceServer setLabelSrv_;
 	ros::ServiceServer listLabelsSrv_;
+#ifdef WITH_OCTOMAP_ROS
 	ros::ServiceServer octomapBinarySrv_;
 	ros::ServiceServer octomapFullSrv_;
+<<<<<<< HEAD
 	ros::ServiceServer rejectLoopSrv_;
 	ros::ServiceServer allowLoopSrv_;
+=======
+#endif
+>>>>>>> kinetic-devel
 
 	MoveBaseClient mbClient_;
 
 	boost::thread* transformThread_;
 
 	float rate_;
+	bool createIntermediateNodes_;
 	ros::Time time_;
+	ros::Time previousStamp_;
 };
 
 #endif /* COREWRAPPER_H_ */
+

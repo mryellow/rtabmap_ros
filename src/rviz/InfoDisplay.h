@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -60,6 +60,7 @@ private:
 	QString info_;
 	int globalCount_;
 	int localCount_;
+	std::map<std::string, float> statistics_;
 	rtabmap::Transform loopTransform_;
 	boost::mutex info_mutex_;
 };

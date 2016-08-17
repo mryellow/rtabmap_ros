@@ -7,20 +7,12 @@ Header header
 ##
 geometry_msgs/Transform mapToOdom
 
-##
-# The nodes
-# std::map<nodeId, mapId>
-int32[] nodeIds
-int32[] mapIds
-string[] labels
-float64[] stamps
-UserData[] userDatas
-
-# std::map<nodeId, Pose>
+# The poses
+int32[] posesId
 geometry_msgs/Pose[] poses
 
-##
 # The links
-##
 Link[] links
+
+
 

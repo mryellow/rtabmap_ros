@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -63,7 +63,7 @@ private:
 	{
 		if(disparityMsg->image.encoding.compare(sensor_msgs::image_encodings::TYPE_32FC1) !=0)
 		{
-			ROS_ERROR("Input type must be disparity=32FC1");
+			NODELET_ERROR("Input type must be disparity=32FC1");
 			return;
 		}
 
