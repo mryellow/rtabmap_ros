@@ -48,9 +48,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/Parameters.h>
 #include <rtabmap/core/Rtabmap.h>
 
+#include "rtabmap_ros/AllowLoop.h"
 #include "rtabmap_ros/GetMap.h"
 #include "rtabmap_ros/ListLabels.h"
 #include "rtabmap_ros/PublishMap.h"
+#include "rtabmap_ros/RejectLoop.h"
 #include "rtabmap_ros/SetGoal.h"
 #include "rtabmap_ros/SetLabel.h"
 #include "rtabmap_ros/Goal.h"
@@ -237,7 +239,12 @@ private:
 #ifdef WITH_OCTOMAP_ROS
 	bool octomapBinaryCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
 	bool octomapFullCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
+<<<<<<< HEAD
+	bool rejectLoopCallback(rtabmap_ros::RejectLoop::Request  &req, rtabmap_ros::RejectLoop::Response &res);
+	bool allowLoopCallback(rtabmap_ros::AllowLoop::Request  &req, rtabmap_ros::AllowLoop::Response &res);
+=======
 #endif
+>>>>>>> kinetic-devel
 
 	rtabmap::ParametersMap loadParameters(const std::string & configFile);
 	void saveParameters(const std::string & configFile);
@@ -471,7 +478,12 @@ private:
 #ifdef WITH_OCTOMAP_ROS
 	ros::ServiceServer octomapBinarySrv_;
 	ros::ServiceServer octomapFullSrv_;
+<<<<<<< HEAD
+	ros::ServiceServer rejectLoopSrv_;
+	ros::ServiceServer allowLoopSrv_;
+=======
 #endif
+>>>>>>> kinetic-devel
 
 	MoveBaseClient mbClient_;
 

@@ -136,6 +136,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart, const ParametersMap & parameters)
 	int queueSize = 10;
 	bool publishTf = true;
 	double tfDelay = 0.05; // 20 Hz
+	bool whitelistClosures = false;
 	double tfTolerance = 0.1; // 100 ms
 	std::string tfPrefix = "";
 	bool approxSync = true;
@@ -177,6 +178,7 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart, const ParametersMap & parameters)
 	pnh.param("ground_truth_frame_id", groundTruthFrameId_, groundTruthFrameId_);
 	pnh.param("depth_cameras",       depthCameras, depthCameras);
 	pnh.param("queue_size",          queueSize, queueSize);
+  pnh.param("whitelist_closures", whitelistClosures, whitelistClosures);
 	if(pnh.hasParam("stereo_approx_sync") && !pnh.hasParam("approx_sync"))
 	{
 		ROS_WARN("Parameter \"stereo_approx_sync\" has been renamed "
@@ -438,6 +440,8 @@ CoreWrapper::CoreWrapper(bool deleteDbOnStart, const ParametersMap & parameters)
 	octomapFullSrv_ = nh.advertiseService("octomap_full", &CoreWrapper::octomapFullCallback, this);
 #endif
 #endif
+  rejectLoopSrv_ = nh.advertiseService("reject_loop", &CoreWrapper::rejectLoopCallback, this);
+  allowLoopSrv_ = nh.advertiseService("allow_loop", &CoreWrapper::allowLoopCallback, this);
 	//private services
 	setLogDebugSrv_ = pnh.advertiseService("log_debug", &CoreWrapper::setLogDebug, this);
 	setLogInfoSrv_ = pnh.advertiseService("log_info", &CoreWrapper::setLogInfo, this);
@@ -2645,6 +2649,44 @@ bool CoreWrapper::octomapFullCallback(
 #endif
 #endif
 
+bool CoreWrapper::rejectLoopCallback(rtabmap_ros::RejectLoop::Request& req, rtabmap_ros::RejectLoop::Response& res)
+{
+	ROS_INFO("Rejecting loop closures on service request");
+	int old_id = req.oldId;
+	int new_id = req.newId;
+	if(old_id > 0 && new_id > 0)
+	{
+		ROS_INFO("Reject closure: %d -> %d", old_id, new_id);
+		UTimer timer;
+		rtabmap_.rejectLoopClosure(old_id, new_id);
+		ROS_INFO("Reject closure: Time rejecting loop = %f s", timer.ticks());
+	}
+	else
+	{
+		ROS_ERROR("Reject closure: oldId and newId should be > 0 !");
+	}
+	return true;
+}
+
+bool CoreWrapper::allowLoopCallback(rtabmap_ros::AllowLoop::Request& req, rtabmap_ros::AllowLoop::Response& res)
+{
+	ROS_INFO("Allowing loop closures on service request");
+	int old_id = req.oldId;
+	int new_id = req.newId;
+	if(old_id > 0 && new_id > 0)
+	{
+		ROS_INFO("Allow closure: %d -> %d", old_id, new_id);
+		UTimer timer;
+		rtabmap_.allowLoopClosure(old_id, new_id);
+		ROS_INFO("Allow closure: Time computing path = %f s", timer.ticks());
+	}
+	else
+	{
+		ROS_ERROR("Allow closure: oldId and newId should be > 0 !");
+	}
+	return true;
+}
+
 /**
  * exclusive callbacks:
  *     image
@@ -3055,6 +3097,3 @@ void CoreWrapper::setupCallbacks(
 		ROS_INFO("\n%s subscribed to:\n   %s", ros::this_node::getName().c_str(), defaultSub_.getTopic().c_str());
 	}
 }
-
-
-
