@@ -239,12 +239,9 @@ private:
 #ifdef WITH_OCTOMAP_ROS
 	bool octomapBinaryCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
 	bool octomapFullCallback(octomap_msgs::GetOctomap::Request  &req, octomap_msgs::GetOctomap::Response &res);
-<<<<<<< HEAD
-	bool rejectLoopCallback(rtabmap_ros::RejectLoop::Request  &req, rtabmap_ros::RejectLoop::Response &res);
-	bool allowLoopCallback(rtabmap_ros::AllowLoop::Request  &req, rtabmap_ros::AllowLoop::Response &res);
-=======
 #endif
->>>>>>> kinetic-devel
+  bool rejectLoopCallback(rtabmap_ros::RejectLoop::Request  &req, rtabmap_ros::RejectLoop::Response &res);
+  bool allowLoopCallback(rtabmap_ros::AllowLoop::Request  &req, rtabmap_ros::AllowLoop::Response &res);
 
 	rtabmap::ParametersMap loadParameters(const std::string & configFile);
 	void saveParameters(const std::string & configFile);
@@ -478,12 +475,9 @@ private:
 #ifdef WITH_OCTOMAP_ROS
 	ros::ServiceServer octomapBinarySrv_;
 	ros::ServiceServer octomapFullSrv_;
-<<<<<<< HEAD
+#endif
 	ros::ServiceServer rejectLoopSrv_;
 	ros::ServiceServer allowLoopSrv_;
-=======
-#endif
->>>>>>> kinetic-devel
 
 	MoveBaseClient mbClient_;
 
@@ -496,4 +490,3 @@ private:
 };
 
 #endif /* COREWRAPPER_H_ */
-
